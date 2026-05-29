@@ -1,8 +1,16 @@
-# cloudxtc — Agentic Cloud Experience Platform
+# ACA: Agentic Cloud Assistant
 
-> Talk to your cloud. Let AI do the work.
+**MSc Computing — Dissertation Project**
 
-cloudxtc is an AI-powered AWS management tool built on the **Model Context Protocol (MCP)**. Instead of clicking through the AWS Console, you describe what you need — cloudxtc scans your cloud, finds the problems, writes the fixes, and waits for your approval before touching anything.
+> An investigation into applying Large Language Models and the Model Context Protocol to AWS infrastructure management, security analysis, and Terraform automation.
+
+---
+
+## Overview
+
+ACA (Agentic Cloud Assistant) is an MSc dissertation prototype that explores how agentic AI systems can assist with cloud infrastructure operations. The system integrates a React frontend, a FastMCP-based Python backend, and AWS APIs to demonstrate three core research themes: **natural-language infrastructure interaction**, **LLM-driven security analysis**, and **human-in-the-loop Infrastructure-as-Code generation**.
+
+This project was developed for academic study purposes. It is a proof-of-concept intended to explore technical feasibility and is **not production-ready software**.
 
 ```
 Browser → React UI → POST /mcp → FastMCP Server → MCP Tools → AWS / LLM / Terraform
@@ -14,58 +22,65 @@ Browser → React UI → POST /mcp → FastMCP Server → MCP Tools → AWS / LL
 
 ---
 
-## Clients
+## Research Objectives
 
-cloudxtc connects from three places simultaneously — same backend, same 30+ tools:
+1. Evaluate the Model Context Protocol (MCP) as an integration layer between LLMs and cloud APIs.
+2. Investigate how LLM-generated summaries can make AWS security findings more accessible.
+3. Prototype a human-in-the-loop Terraform pipeline driven by natural-language input.
+4. Explore Retrieval-Augmented Generation (RAG) for grounding infrastructure Q&A in domain knowledge.
+5. Assess agentic autonomy patterns (scan → analyse → fix → approve) within a real AWS environment.
 
-| Client | Transport | How to connect |
+---
+
+## System Architecture
+
+The prototype supports three client interfaces, all backed by the same FastMCP server:
+
+| Client | Transport | Connection |
 |---|---|---|
-| **Browser** | HTTP | Full React dashboard at `http://localhost:5173` |
+| **Browser** | HTTP | React dashboard at `http://localhost:5173` |
 | **Claude Desktop** | stdio | Launched as a subprocess via MCP config (see [Integration](#claude-desktop--claude-code-integration)) |
-| **Claude Code CLI** | HTTP | Add `http://localhost:8000/mcp` as a streamable-HTTP MCP server |
+| **Claude Code CLI** | HTTP | `http://localhost:8000/mcp` as a streamable-HTTP MCP server |
 
 ---
 
-## How It Works
+## How the Prototype Works
 
-### 01 — Scan
-Enter your AWS credentials and click **Scan**. cloudxtc runs five parallel scanners across EC2, S3, IAM, Security Groups, and VPCs and populates the dashboard in seconds.
+### Step 1 — Scan
+AWS credentials are provided via the settings panel. The system runs five parallel boto3 scanners across EC2, S3, IAM, Security Groups, and VPCs, populating the dashboard with live infrastructure state. Results auto-refresh every 90 seconds.
 
-### 02 — Analyse
-Click **Analyse** on the Security or Cost panel. The 7-rule engine flags every misconfiguration, assigns severity (HIGH / MEDIUM / LOW), and an LLM writes a plain-English summary of what's wrong and why.
+### Step 2 — Analyse
+A rule-based security engine applies 7 pre-defined checks to the scan results, assigns a severity level (HIGH / MEDIUM / LOW), and invokes an LLM to generate a plain-English explanation of each finding.
 
-### 03 — Fix & Approve
-Choose direct revoke (instant), manual Terraform generation, or the autonomous agent. cloudxtc shows you the full `terraform plan` diff before anything changes. You approve. It applies.
-
-> cloudxtc never applies a change without your explicit approval.
+### Step 3 — Fix & Approve
+Three remediation paths are provided for study: a direct SDK call (instant revoke), LLM-generated Terraform HCL, and an autonomous agent loop. In all cases a full `terraform plan` diff is presented before any change is applied. No infrastructure change is made without explicit approval — this human gate is a core design requirement of the research.
 
 ---
 
-## Features
+## Technical Implementation
 
-### Infrastructure & Security
-- **AWS scanning** — EC2, S3, IAM, Security Groups, VPCs, and SG usage maps (via ENIs, covering all resource types); auto-refreshes every 90 seconds
-- **7-rule security engine** — open SSH/RDP, public S3, missing MFA, root account usage, over-permissive IAM, inactive users, default VPC; severity-ranked HIGH / MEDIUM / LOW with a 0–100 health score
-- **Direct fix** — one-click `revoke_open_ingress_rule` removes 0.0.0.0/0 rules for SSH / RDP without generating Terraform
-- **Cost monitoring** — current month spend, 3-month trend, per-service breakdown, 20%+ spike anomaly detection, LLM optimisation recommendations
+### Infrastructure Scanning & Security Analysis
+- **AWS scanning** — EC2, S3, IAM, Security Groups, VPCs, and SG usage maps via ENIs; covers all major resource types and auto-refreshes every 90 seconds
+- **7-rule security engine** — open SSH/RDP, public S3, missing MFA, root account usage, over-permissive IAM, inactive users, default VPC; severity-ranked HIGH / MEDIUM / LOW with a composite 0–100 health score
+- **Direct remediation** — `revoke_open_ingress_rule` removes 0.0.0.0/0 rules for SSH/RDP directly via the AWS SDK as a baseline comparison to the Terraform approach
+- **Cost analysis** — current month spend, 3-month trend, per-service breakdown, 20%+ spike anomaly detection, and LLM-generated optimisation commentary
 
 ### Terraform Pipeline
-- **HCL generation** — describe any AWS resource in plain English; the LLM scans live infra first to reference real VPC / SG / subnet IDs and avoid conflicts
-- **Syntax validation** — `terraform validate` runs automatically after every generation
-- **Human-in-the-loop execution** — `terraform plan` runs first and shows a full diff; `terraform apply` fires only on explicit approval; `terraform destroy` available for instant rollback
-- **Remote S3 state** — when `TF_STATE_BUCKET` is set, state is stored in S3 with DynamoDB locking; concurrent applies are safe
-- **Plugin cache** — provider binaries (~727 MB) downloaded once and hardlinked across all executions
+- **HCL generation** — natural-language requests are translated into Terraform HCL; the LLM is first grounded with a live infrastructure scan to reference real VPC / SG / subnet IDs
+- **Syntax validation** — `terraform validate` runs automatically after every generation step
+- **Human-in-the-loop execution** — `terraform plan` is always run first and its diff surfaced to the user; `terraform apply` requires explicit approval; `terraform destroy` is available for rollback
+- **Remote S3 state** — when `TF_STATE_BUCKET` is set, state is stored in S3 with DynamoDB locking to explore concurrent-safe state management
+- **Plugin cache** — provider binaries (~727 MB) are downloaded once and hardlinked across executions to reduce setup time during development
 
-### AI & Knowledge
-- **Agentic remediation** — autonomous agent scans AWS, picks the highest-severity finding, generates a Terraform fix, plans it, and presents a plain-English summary for sign-off
-- **Infrastructure chat** — ask questions about your live AWS environment in plain English; every message is grounded in a fresh scan, augmented with up to 3 relevant knowledge base chunks
-- **RAG knowledge base** — ChromaDB vector store auto-seeded with 5 AWS best-practice documents on first start; add custom PDFs or text files and ask questions grounded by retrieved chunks
+### LLM Integration & RAG
+- **Agentic loop** — an autonomous agent implements a scan → rank → generate → plan → summarise cycle, demonstrating end-to-end agentic behaviour with a mandatory human approval gate
+- **Infrastructure Q&A** — natural-language queries are answered with fresh scan data injected as context, augmented with up to 3 relevant RAG chunks
+- **RAG knowledge base** — ChromaDB vector store seeded with 5 AWS best-practice documents; custom PDFs or text files can be added and queried to study RAG grounding behaviour
 
-### Operations
-- **Execution history & audit log** — persistent, file-locked JSON log of every plan/apply/destroy with timestamps, status, and full terminal output; mark findings resolved without deletion
-- **PEM key download** — EC2 instances created with a new key pair generate a downloadable `.pem` file served at `/terraform/keys/{id}/{filename}`
-- **Startup workdir cleanup** — plan-only working directories older than 7 days are automatically purged on server start to reclaim disk space
-- **Claude Desktop & Claude Code** — the same MCP server runs in stdio mode (Desktop) or HTTP mode (Code); 30+ tools available as slash commands
+### Observability & State
+- **Execution log** — a persistent, file-locked JSON log records every plan/apply/destroy operation with timestamps, status, and full terminal output
+- **PEM key download** — EC2 instances created during experiments can download the generated `.pem` file from `/terraform/keys/{id}/{filename}`
+- **Workdir cleanup** — plan-only working directories older than 7 days are purged on startup to manage disk usage during extended development
 
 ---
 
@@ -76,12 +91,12 @@ Choose direct revoke (instant), manual Terraform generation, or the autonomous a
 | Python 3.10+ | Backend runtime |
 | Node.js 18+ | Frontend build tooling |
 | Terraform CLI 1.x | Must be on `$PATH` — verify with `terraform --version` |
-| AWS account | Programmatic access key + secret key required |
-| LLM API key | Groq (free tier sufficient) **or** Anthropic |
+| AWS account | Programmatic access key + secret key required for live testing |
+| LLM API key | Groq (free tier sufficient for development) **or** Anthropic |
 
 ---
 
-## Quick Start
+## Setup & Running
 
 ### Backend
 
@@ -94,19 +109,19 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env                       # fill in your LLM API key
+nano .env                       # add your LLM API key
 
 uvicorn main:app --reload --port 8000
 ```
 
-The server exposes:
+The backend exposes the following interfaces:
 
 | Interface | URL | Purpose |
 |---|---|---|
-| MCP endpoint | `POST http://localhost:8000/mcp` | Primary — used by the React frontend and all MCP clients |
-| Swagger UI | `http://localhost:8000/docs` | Auto-generated test UI for every MCP tool |
-| Key download | `GET http://localhost:8000/terraform/keys/{id}/{file}` | Binary PEM file download |
-| RAG upload | `POST http://localhost:8000/rag/documents/upload` | Multipart PDF / text file upload |
+| MCP endpoint | `POST http://localhost:8000/mcp` | Primary interface used by the React frontend and all MCP clients |
+| Swagger UI | `http://localhost:8000/docs` | Auto-generated test interface for every MCP tool |
+| Key download | `GET http://localhost:8000/terraform/keys/{id}/{file}` | PEM file download for EC2 experiments |
+| RAG upload | `POST http://localhost:8000/rag/documents/upload` | Multipart PDF / text file upload to the knowledge base |
 
 ### Frontend
 
@@ -116,55 +131,55 @@ npm install
 npm run dev
 ```
 
-The UI will be available at `http://localhost:5173`. The frontend communicates **exclusively** via `POST /mcp` — there are no separate REST calls for business logic.
+The UI is available at `http://localhost:5173`. All frontend–backend communication goes through `POST /mcp` — there are no separate REST calls for business logic, which was a deliberate architectural choice to validate MCP as a unified integration layer.
 
 ---
 
 ## First Run
 
-1. Open `http://localhost:5173` in your browser.
+1. Open `http://localhost:5173` in a browser.
 2. Log in — **username:** `admin` **password:** `demo2024`.
-3. Click **Settings** (top-right) → **Cloud Credentials** tab — enter your AWS Access Key ID, Secret Key, and preferred region.
-4. On the **LLM Settings** tab, enter your Groq or Anthropic API key and select a model.
-5. Close settings and click **Scan** — all five AWS scanners will run and populate the dashboard.
+3. Open **Settings** (top-right) → **Cloud Credentials** tab — enter your AWS Access Key ID, Secret Key, and region.
+4. On the **LLM Settings** tab, enter a Groq or Anthropic API key and select a model.
+5. Click **Scan** — all five AWS scanners run and populate the dashboard.
 6. Click **Analyse** on the Security panel to run the 7-rule engine and generate an LLM summary.
 
-> **Security note:** AWS credentials are never stored on disk — they are passed at request time and forwarded directly to boto3. The `admin / demo2024` login is hardcoded for local development only; do not expose this application to the public internet without replacing the authentication layer.
+> **Note on credentials:** AWS credentials are held in memory only — they are never written to disk and are forwarded directly to boto3 at request time. The `admin / demo2024` login is a hardcoded stub for local development. This prototype is intended to run locally and should not be exposed to the public internet.
 
 ---
 
 ## Environment Variables
 
-All variables live in `backend/.env` (copy from `backend/.env.example`):
+All variables are configured in `backend/.env` (copy from `backend/.env.example`):
 
 | Variable | Required | Description |
 |---|---|---|
 | `GROQ_API_KEY` | One of these | Groq API key — used when model is set to `groq` |
 | `ANTHROPIC_API_KEY` | One of these | Anthropic API key — used when model is set to `anthropic` |
 | `AWS_DEFAULT_REGION` | No | Default AWS region (default: `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` | No | Server-side AWS key; prefer IAM roles in production |
+| `AWS_ACCESS_KEY_ID` | No | Server-side AWS key for testing without UI credential entry |
 | `AWS_SECRET_ACCESS_KEY` | No | Server-side AWS secret |
 | `TF_STATE_BUCKET` | No | S3 bucket for Terraform state (enables S3 backend when set) |
 | `TF_STATE_LOCK_TABLE` | No | DynamoDB table for state locking (default: `terraform-state-lock`) |
-| `TF_STATE_REGION` | No | Region for S3 bucket and DynamoDB table (default: `us-east-1`) |
-| `DEBUG` | No | Set `true` for FastAPI debug/reload mode; use `false` in production |
+| `TF_STATE_REGION` | No | Region for the S3 bucket and DynamoDB table (default: `us-east-1`) |
+| `DEBUG` | No | Set `true` for FastAPI debug/reload mode during development |
 
 ---
 
 ## Terraform S3 State Backend (Optional)
 
-By default Terraform writes state locally into `terraform_workdirs/`. For production or any setup where state must be durable and concurrent-apply safe, configure a remote S3 backend.
+By default Terraform writes state locally to `terraform_workdirs/`. The S3 backend configuration was implemented to explore durable, concurrent-safe state management as an extension to the core prototype.
 
-### One-shot setup
+### Setup script
 
 ```bash
-# Auto-names the bucket using your AWS account ID
+# Auto-names the bucket using the AWS account ID
 ./setup_s3_backend.sh
 
-# Or specify a custom name / region
+# Specify a custom name / region
 ./setup_s3_backend.sh --bucket my-tfstate-bucket --region eu-west-1
 
-# Dry-run to preview what will happen without making changes
+# Dry-run — previews actions without making changes
 ./setup_s3_backend.sh --dry-run
 ```
 
@@ -175,19 +190,19 @@ The script:
 
 Safe to run multiple times — it skips resources that already exist.
 
-### After setup
+### Verifying S3 state
 
 ```bash
-# Restart the backend to pick up the new .env vars
+# Restart the backend to pick up the updated .env
 cd backend && uvicorn main:app --reload --port 8000
 
-# After a plan + apply, verify state landed in S3
+# After a plan + apply, confirm state was written to S3
 aws s3 ls s3://$(grep TF_STATE_BUCKET backend/.env | cut -d= -f2)/ --recursive
 ```
 
-### How it works
+### Implementation detail
 
-When `TF_STATE_BUCKET` is present, `execution_service.py` writes a `backend.tf` alongside `main.tf` before running `terraform init`:
+When `TF_STATE_BUCKET` is present, `execution_service.py` generates a `backend.tf` alongside `main.tf` before `terraform init`:
 
 ```hcl
 terraform {
@@ -201,7 +216,7 @@ terraform {
 }
 ```
 
-Each execution gets its own isolated state key (`exec_YYYYMMDD_HHMMSS_xxxxxxxx/terraform.tfstate`). The DynamoDB lock is acquired automatically at the start of `apply` and released when it completes — preventing concurrent applies from corrupting state.
+Each execution gets an isolated state key (`exec_YYYYMMDD_HHMMSS_xxxxxxxx/terraform.tfstate`). The DynamoDB lock is acquired at the start of `apply` and released on completion.
 
 | | Local mode (default) | S3 mode |
 |---|---|---|
@@ -214,7 +229,7 @@ Each execution gets its own isolated state key (`exec_YYYYMMDD_HHMMSS_xxxxxxxx/t
 
 ## Claude Desktop & Claude Code Integration
 
-The MCP server can be connected directly to Claude Desktop or Claude Code without the React UI.
+One research question was whether the same MCP server could serve both a browser client and AI coding assistants without modification. The following configurations demonstrate this.
 
 ### Claude Code (HTTP transport)
 
@@ -255,7 +270,7 @@ See `claude_desktop_config_example.json` for the full template.
 
 ## MCP Tool Reference
 
-All tools are callable via `POST /mcp` (JSON-RPC `tools/call`) or the Swagger UI at `/docs`.
+All 30+ tools are callable via `POST /mcp` (JSON-RPC `tools/call`) or through the Swagger UI at `/docs`.
 
 ### Group A — AWS Scanning
 
@@ -295,10 +310,10 @@ All tools are callable via `POST /mcp` (JSON-RPC `tools/call`) or the Swagger UI
 
 | Tool | Description |
 |---|---|
-| `aws_chat` | Chat with an LLM about live AWS state; injects a full scan as context, augmented with relevant knowledge base chunks |
+| `aws_chat` | Converse with an LLM about live AWS state; injects a full scan as context, augmented with relevant knowledge base chunks |
 | `agent_run` | Autonomous agent: scan → pick top finding → generate fix → plan → summarise |
 | `agent_approve` | Human approval gate for agent-generated plans |
-| `revoke_open_ingress_rule` | Direct AWS SDK fix — removes all 0.0.0.0/0 rules for a given port on a SG |
+| `revoke_open_ingress_rule` | Direct AWS SDK fix — removes all 0.0.0.0/0 rules for a given port on a security group |
 | `mark_execution_resolved` | Mark a finding execution as resolved in the audit log (audit-safe, no deletion) |
 | `rollback_execution` | Run `terraform destroy` on a completed execution's saved main.tf |
 
@@ -399,3 +414,9 @@ aca-app-dev/
     ├── ACTIVITY_DIAGRAM_TERRAFORM_WORKFLOW.png
     └── ...
 ```
+
+---
+
+## Academic Disclaimer
+
+This prototype was developed as part of an MSc Computing dissertation. It is a research artefact intended to demonstrate technical feasibility and support academic analysis. It has not been security-audited, load-tested, or hardened for production deployment. All AWS interactions during evaluation were performed on a dedicated test account with minimal permissions.
