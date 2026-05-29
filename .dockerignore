@@ -1,0 +1,30 @@
+# Git and IDE
+.git
+.github
+.vscode
+
+# Python
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/venv
+**/.venv
+
+# Frontend build output and dependencies
+frontend/node_modules
+frontend/dist
+
+# Runtime data — mounted as Docker volumes
+backend/chroma_db
+backend/terraform_workdirs
+backend/execution_log.json
+backend/benchmark_results.json
+
+# Secrets
+backend/.env
+**/.env
+**/*.pem
+**/*.key
+
+# Docs and markdown — not needed in the image
+*.md

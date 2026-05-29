@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+boto3
+python-dotenv
+httpx
+python-dateutil
+anthropic
+groq
+chromadb==1.5.7
+pyyaml
+sentence-transformers==2.7.0
+pypdf2==3.0.1
+python-multipart==0.0.9
+fastmcp
+filelock
+cachetools

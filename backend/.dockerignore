@@ -1,0 +1,27 @@
+# Python cache
+__pycache__
+*.pyc
+.pytest_cache
+
+# Virtual environment — dependencies are installed fresh inside the image
+venv
+.venv
+
+# Runtime data — mounted as Docker volumes, not baked into the image
+chroma_db
+terraform_workdirs
+execution_log.json
+benchmark_results.json
+
+# Secrets — never bake API keys into the image
+.env
+*.pem
+*.key
+
+# Dev and test files — not needed in production image
+tests
+benchmark.py
+test.py
+
+# IDE
+.vscode

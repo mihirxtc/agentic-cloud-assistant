@@ -1,0 +1,35 @@
+{
+  "_comment": "Two ways to connect to the Agentic Cloud Assistant MCP server.",
+
+  "_http_comment": "OPTION 1 — HTTP transport (Claude Code CLI). Start the server first:",
+  "_http_start":   "cd backend && python mcp_server.py",
+  "_http_then":    "Add this block to ~/.claude/claude_code_config.json (or use /mcp add):",
+
+  "_stdio_comment": "OPTION 2 — stdio transport (Claude Desktop). Claude Desktop launches the process itself.",
+  "_stdio_note":    "Replace /absolute/path/to with the real filesystem path on your machine.",
+
+  "mcpServers": {
+    "agentic-cloud-assistant": {
+      "_transport": "HTTP — for Claude Code CLI (server must already be running on port 8000)",
+      "url": "http://localhost:8000/mcp",
+      "type": "streamable-http"
+    },
+
+    "agentic-cloud-assistant-desktop": {
+      "_transport": "stdio — for Claude Desktop (Claude Desktop manages the process lifetime)",
+      "command": "/absolute/path/to/ACA-MCP/.venv/bin/python",
+      "args": [
+        "/absolute/path/to/ACA-MCP/backend/mcp_server.py",
+        "--stdio"
+      ],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/ACA-MCP/backend",
+        "AWS_ACCESS_KEY_ID": "your-access-key-id",
+        "AWS_SECRET_ACCESS_KEY": "your-secret-access-key",
+        "AWS_DEFAULT_REGION": "us-east-1",
+        "GROQ_API_KEY": "your-groq-key",
+        "ANTHROPIC_API_KEY": "your-anthropic-key"
+      }
+    }
+  }
+}

@@ -1,0 +1,550 @@
+/* ─── CSS Variables ─────────────────────────────────────────────────────── */
+:root {
+  --bg-root:        #000000;
+  --bg-panel:       #0a0a0a;
+  --bg-elevated:    #111111;
+  --bg-hover:       #1a1a1a;
+  --border:         #1f1f1f;
+  --border-bright:  #333333;
+  --text-primary:   #ededed;
+  --text-secondary: #888888;
+  --text-muted:     #444444;
+  --accent:         #ffffff;
+  --accent-blue:    #0070f3;
+  --accent-blue-dim:#0070f320;
+  --success:        #50e3c2;
+  --warning:        #f5a623;
+  --error:          #ff4444;
+  --success-dim:    #50e3c215;
+  --warning-dim:    #f5a62315;
+  --error-dim:      #ff444415;
+}
+
+/* ─── Reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-root);
+  color: var(--text-primary);
+}
+
+body {
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  margin: 0;
+  width: 100%;
+  text-align: left;
+  min-height: 100vh;
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar          { width: 6px; height: 6px; }
+::-webkit-scrollbar-track    { background: transparent; }
+::-webkit-scrollbar-thumb    { background: var(--border-bright); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ─── Keyframes ──────────────────────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes pulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%            { opacity: 1;    transform: scale(1); }
+}
+
+/* Internal aliases used by ACA component classes */
+@keyframes aca-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes aca-pulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%            { opacity: 1;    transform: scale(1); }
+}
+
+/* ─── Form element font inheritance ─────────────────────────────────────── */
+button          { font-family: inherit; cursor: pointer; }
+input, textarea, select { font-family: inherit; }
+
+/* ─── ACA Panels ─────────────────────────────────────────────────────────── */
+.aca-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.aca-panel-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+.aca-panel-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.aca-panel-body { padding: 20px; }
+
+/* ─── ACA Buttons ────────────────────────────────────────────────────────── */
+.aca-btn-primary {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  transition: opacity 0.12s ease;
+  font-family: inherit;
+}
+.aca-btn-primary:hover    { opacity: 0.88; }
+.aca-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.aca-btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  color: var(--text-primary);
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 5px 12px;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.aca-btn-ghost:hover              { background: var(--bg-hover); }
+.aca-btn-ghost.danger:hover       { border-color: var(--error); color: var(--error); background: transparent; }
+.aca-btn-ghost.small              { padding: 3px 8px; font-size: 11px; }
+
+/* ─── ACA Inputs ─────────────────────────────────────────────────────────── */
+.aca-input, .aca-textarea, .aca-select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.12s ease;
+}
+.aca-input:focus, .aca-textarea:focus, .aca-select:focus { border-color: var(--border-bright); }
+.aca-textarea  { resize: none; font-family: inherit; }
+.aca-select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
+/* ─── ACA Badges ─────────────────────────────────────────────────────────── */
+.aca-badge {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+}
+.aca-badge.high    { background: var(--error-dim);   color: var(--error); }
+.aca-badge.medium  { background: var(--warning-dim); color: var(--warning); }
+.aca-badge.low     { background: rgba(136,136,136,0.12); color: var(--text-secondary); }
+.aca-badge.success { background: var(--success-dim); color: var(--success); }
+.aca-badge.warning { background: var(--warning-dim); color: var(--warning); }
+.aca-badge.error   { background: var(--error-dim);   color: var(--error); }
+.aca-badge.muted   { background: rgba(136,136,136,0.10); color: var(--text-secondary); }
+.aca-badge.blue    { background: var(--accent-blue-dim); color: var(--accent-blue); }
+
+/* ─── ACA Code block ─────────────────────────────────────────────────────── */
+.aca-code {
+  background: #0a0a0a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre;
+  overflow: auto;
+}
+
+/* ─── ACA Tiles ──────────────────────────────────────────────────────────── */
+.aca-tile {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.aca-tile-value {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 28px;
+  line-height: 1.1;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.aca-tile-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ─── ACA Link button ────────────────────────────────────────────────────── */
+.aca-link-btn {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: 12px;
+  padding: 0;
+  text-decoration: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+.aca-link-btn:hover { text-decoration: underline; }
+
+/* ─── ACA Skeleton loader ────────────────────────────────────────────────── */
+.aca-skel {
+  background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--bg-hover) 50%, var(--bg-elevated) 75%);
+  background-size: 200% 100%;
+  animation: aca-shimmer 1.4s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* ─── ACA Grid ───────────────────────────────────────────────────────────── */
+.aca-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 16px;
+  padding: 16px 24px 40px;
+}
+@media (max-width: 1200px) {
+  .aca-grid > * { grid-column: span 12 !important; }
+}
+
+/* ─── ACA Animated dots ──────────────────────────────────────────────────── */
+.aca-dots { display: inline-flex; gap: 4px; align-items: center; }
+.aca-dots span {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--text-muted);
+  animation: aca-pulse 1.2s infinite ease-in-out;
+}
+.aca-dots.blue span              { background: var(--accent-blue); }
+.aca-dots span:nth-child(2)     { animation-delay: 0.2s; }
+.aca-dots span:nth-child(3)     { animation-delay: 0.4s; }
+
+/* ─── ACA Utility ────────────────────────────────────────────────────────── */
+.aca-row     { display: flex; align-items: center; gap: 8px; }
+.aca-divider { height: 1px; background: var(--border); border: 0; margin: 0; }
+
+.aca-summary {
+  background: var(--bg-elevated);
+  border-left: 2px solid var(--accent-blue);
+  padding: 12px 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  border-radius: 0 6px 6px 0;
+}
+
+/* ─── ACA Tabs ───────────────────────────────────────────────────────────── */
+.aca-tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.aca-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 10px 14px;
+  cursor: pointer;
+  position: relative;
+  top: 1px;
+  border-bottom: 2px solid transparent;
+}
+.aca-tab[data-active="true"] { color: var(--text-primary); border-bottom-color: var(--accent); }
+.aca-tab:hover               { color: var(--text-primary); }
+
+/* ─── ACA Table ──────────────────────────────────────────────────────────── */
+.aca-table { width: 100%; border-collapse: collapse; }
+.aca-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.aca-table td            { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; font-size: 12px; }
+.aca-table tr:last-child td { border-bottom: none; }
+.aca-table tr.expandable     { cursor: pointer; }
+.aca-table tr.expandable:hover { background: var(--bg-elevated); }
+
+/* ─── ACA Pill button ────────────────────────────────────────────────────── */
+.aca-pill-btn {
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.aca-pill-btn:hover { background: var(--bg-hover); border-color: var(--text-secondary); }
+
+/* ─── ACA Chat messages ──────────────────────────────────────────────────── */
+.aca-chat-msg.user {
+  align-self: flex-end;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: 8px 8px 2px 8px;
+  padding: 10px 14px;
+  max-width: 78%;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.aca-chat-msg.assistant {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px 8px 8px 2px;
+  padding: 10px 14px;
+  max-width: 85%;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* ─── ACA Status dot ─────────────────────────────────────────────────────── */
+.aca-dot-indicator         { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.aca-dot-indicator.green   { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.aca-dot-indicator.red     { background: var(--error); }
+.aca-dot-indicator.amber   { background: var(--warning); }
+
+/* ─── ACA Finding card ───────────────────────────────────────────────────── */
+.aca-finding {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  background: var(--bg-panel);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.aca-finding:hover          { border-color: var(--border-bright); }
+.aca-finding[data-open="true"] { background: var(--bg-elevated); }
+
+/* ─── ACA KV list ────────────────────────────────────────────────────────── */
+.aca-kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 14px; font-size: 12px; }
+.aca-kv dt {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding-top: 2px;
+}
+.aca-kv dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 12px;
+}
+
+/* ─── ACA Misc ───────────────────────────────────────────────────────────── */
+.aca-checkbox-row { display: flex; align-items: center; gap: 10px; color: var(--text-secondary); font-size: 12px; }
+.aca-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+
+/* ─── ACA Bar chart row ──────────────────────────────────────────────────── */
+.aca-bar-row                { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+.aca-bar-row .name          { flex: 0 0 120px; color: var(--text-primary); font-size: 12px; }
+.aca-bar-row .track         { flex: 1; height: 3px; background: var(--bg-elevated); border-radius: 2px; overflow: hidden; }
+.aca-bar-row .fill          { height: 100%; background: var(--accent-blue); border-radius: 2px; }
+.aca-bar-row .amount {
+  flex: 0 0 auto;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--accent-blue);
+  min-width: 80px;
+  text-align: right;
+}
+
+/* ─── ACA Empty state ────────────────────────────────────────────────────── */
+.aca-empty {
+  border: 1px dashed var(--border-bright);
+  border-radius: 8px;
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 13px;
+}
+
+/* ─── Tweaks panel ───────────────────────────────────────────────────────── */
+.twk-panel {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2147483646; width: 280px;
+  max-height: calc(100vh - 32px); display: flex; flex-direction: column;
+  background: rgba(250,249,247,.78); color: #29261b;
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: .5px solid rgba(255,255,255,.6); border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(255,255,255,.5) inset, 0 12px 40px rgba(0,0,0,.18);
+  font: 11.5px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+.twk-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 8px 10px 14px; cursor: move; user-select: none;
+}
+.twk-hd b { font-size: 12px; font-weight: 600; letter-spacing: .01em; }
+.twk-x {
+  appearance: none; border: 0; background: transparent; color: rgba(41,38,27,.55);
+  width: 22px; height: 22px; border-radius: 6px; cursor: default; font-size: 13px; line-height: 1;
+}
+.twk-x:hover { background: rgba(0,0,0,.06); color: #29261b; }
+.twk-body {
+  padding: 2px 14px 14px; display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto; overflow-x: hidden; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.15) transparent;
+}
+.twk-body::-webkit-scrollbar       { width: 8px; }
+.twk-body::-webkit-scrollbar-track { background: transparent; margin: 2px; }
+.twk-body::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,.15); border-radius: 4px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.twk-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,.25);
+  border: 2px solid transparent; background-clip: content-box;
+}
+.twk-row   { display: flex; flex-direction: column; gap: 5px; }
+.twk-row-h { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+.twk-lbl   { display: flex; justify-content: space-between; align-items: baseline; color: rgba(41,38,27,.72); }
+.twk-lbl > span:first-child { font-weight: 500; }
+.twk-val   { color: rgba(41,38,27,.5); font-variant-numeric: tabular-nums; }
+.twk-sect  {
+  font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: rgba(41,38,27,.45); padding: 10px 0 0;
+}
+.twk-sect:first-child { padding-top: 0; }
+.twk-field {
+  appearance: none; width: 100%; height: 26px; padding: 0 8px;
+  border: .5px solid rgba(0,0,0,.1); border-radius: 7px;
+  background: rgba(255,255,255,.6); color: inherit; font: inherit; outline: none;
+}
+.twk-field:focus          { border-color: rgba(0,0,0,.25); background: rgba(255,255,255,.85); }
+select.twk-field {
+  padding-right: 22px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
+  background-repeat: no-repeat; background-position: right 8px center;
+}
+.twk-slider {
+  appearance: none; -webkit-appearance: none; width: 100%; height: 4px; margin: 6px 0;
+  border-radius: 999px; background: rgba(0,0,0,.12); outline: none;
+}
+.twk-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%; background: #fff;
+  border: .5px solid rgba(0,0,0,.12); box-shadow: 0 1px 3px rgba(0,0,0,.2); cursor: default;
+}
+.twk-slider::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; border: .5px solid rgba(0,0,0,.12); box-shadow: 0 1px 3px rgba(0,0,0,.2); cursor: default;
+}
+.twk-seg {
+  position: relative; display: flex; padding: 2px; border-radius: 8px;
+  background: rgba(0,0,0,.06); user-select: none;
+}
+.twk-seg-thumb {
+  position: absolute; top: 2px; bottom: 2px; border-radius: 6px;
+  background: rgba(255,255,255,.9); box-shadow: 0 1px 2px rgba(0,0,0,.12);
+  transition: left .15s cubic-bezier(.3,.7,.4,1), width .15s;
+}
+.twk-seg.dragging .twk-seg-thumb { transition: none; }
+.twk-seg button {
+  appearance: none; position: relative; z-index: 1; flex: 1; border: 0;
+  background: transparent; color: inherit; font: inherit; font-weight: 500;
+  height: 22px; border-radius: 6px; cursor: default; padding: 0;
+}
+.twk-toggle {
+  position: relative; width: 32px; height: 18px; border: 0; border-radius: 999px;
+  background: rgba(0,0,0,.15); transition: background .15s; cursor: default; padding: 0;
+}
+.twk-toggle[data-on="1"] { background: #34c759; }
+.twk-toggle i {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s;
+}
+.twk-toggle[data-on="1"] i { transform: translateX(14px); }
+.twk-num {
+  display: flex; align-items: center; height: 26px; padding: 0 0 0 8px;
+  border: .5px solid rgba(0,0,0,.1); border-radius: 7px; background: rgba(255,255,255,.6);
+}
+.twk-num-lbl  { font-weight: 500; color: rgba(41,38,27,.6); cursor: ew-resize; user-select: none; padding-right: 8px; }
+.twk-num input {
+  flex: 1; min-width: 0; height: 100%; border: 0; background: transparent;
+  font: inherit; font-variant-numeric: tabular-nums; text-align: right;
+  padding: 0 8px 0 0; outline: none; color: inherit; -moz-appearance: textfield;
+}
+.twk-num input::-webkit-inner-spin-button,
+.twk-num input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.twk-num-unit { padding-right: 8px; color: rgba(41,38,27,.45); }
+.twk-btn {
+  appearance: none; height: 26px; padding: 0 12px; border: 0; border-radius: 7px;
+  background: rgba(0,0,0,.78); color: #fff; font: inherit; font-weight: 500; cursor: default;
+}
+.twk-btn:hover           { background: rgba(0,0,0,.88); }
+.twk-btn.secondary       { background: rgba(0,0,0,.06); color: inherit; }
+.twk-btn.secondary:hover { background: rgba(0,0,0,.1); }
+.twk-swatch {
+  appearance: none; -webkit-appearance: none; width: 56px; height: 22px;
+  border: .5px solid rgba(0,0,0,.1); border-radius: 6px; padding: 0; cursor: default;
+  background: transparent; flex-shrink: 0;
+}
+.twk-swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.twk-swatch::-webkit-color-swatch         { border: 0; border-radius: 5.5px; }
+.twk-swatch::-moz-color-swatch            { border: 0; border-radius: 5.5px; }
