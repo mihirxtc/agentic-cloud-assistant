@@ -187,7 +187,7 @@ The frontend is now running. Open `http://localhost:5173` in your browser.
 When the app loads, you will be prompted to log in. Use these credentials:
 
 - **Username:** `admin`
-- **Password:** `demo2024`
+- **Password:** `mscProject@DMU`
 
 > These are hardcoded development credentials for local use only. The app is not intended to be deployed publicly.
 
