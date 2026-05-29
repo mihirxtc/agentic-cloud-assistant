@@ -416,7 +416,3 @@ aca-app-dev/
 ```
 
 ---
-
-## Academic Disclaimer
-
-This prototype was developed as part of an MSc Computing dissertation. It is a research artefact intended to demonstrate technical feasibility and support academic analysis. It has not been security-audited, load-tested, or hardened for production deployment. All AWS interactions during evaluation were performed on a dedicated test account with minimal permissions.
