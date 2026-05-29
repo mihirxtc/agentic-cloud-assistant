@@ -1,418 +1,324 @@
-# ACA: Agentic Cloud Assistant
+# ACA — Agentic Cloud Assistant
 
 **MSc Computing — Dissertation Project**
 
-> An investigation into applying Large Language Models and the Model Context Protocol to AWS infrastructure management, security analysis, and Terraform automation.
+> An investigation into applying Large Language Models (LLMs) and the Model Context Protocol (MCP) to AWS cloud infrastructure management, automated security analysis, and natural-language Terraform generation.
 
 ---
 
-## Overview
+## What Is This?
 
-ACA (Agentic Cloud Assistant) is an MSc dissertation prototype that explores how agentic AI systems can assist with cloud infrastructure operations. The system integrates a React frontend, a FastMCP-based Python backend, and AWS APIs to demonstrate three core research themes: **natural-language infrastructure interaction**, **LLM-driven security analysis**, and **human-in-the-loop Infrastructure-as-Code generation**.
+ACA is a web-based prototype built as part of an MSc Computing dissertation. It connects to your AWS account, scans your cloud infrastructure, identifies security problems, and uses AI (via Groq or Anthropic's Claude) to explain those problems in plain English and suggest fixes — including generating Terraform code to automate remediation.
 
-This project was developed for academic study purposes. It is a proof-of-concept intended to explore technical feasibility and is **not production-ready software**.
+The system has two parts:
+- A **frontend** (the web interface you see in a browser), built with React
+- A **backend** (the server that talks to AWS and the AI), built with Python
 
-```
-Browser → React UI → POST /mcp → FastMCP Server → MCP Tools → AWS / LLM / Terraform
-                               └→ Claude Desktop (stdio mode)
-                               └→ Claude Code (HTTP mode)
-```
+Both need to be running at the same time for the app to work.
 
 ![High Level System Architecture](aca-diagrams/HIGH_LEVEL_SYSTEM_ARCHITECTURE.png)
 
 ---
 
-## Research Objectives
+## Before You Begin — Prerequisites
 
-1. Evaluate the Model Context Protocol (MCP) as an integration layer between LLMs and cloud APIs.
-2. Investigate how LLM-generated summaries can make AWS security findings more accessible.
-3. Prototype a human-in-the-loop Terraform pipeline driven by natural-language input.
-4. Explore Retrieval-Augmented Generation (RAG) for grounding infrastructure Q&A in domain knowledge.
-5. Assess agentic autonomy patterns (scan → analyse → fix → approve) within a real AWS environment.
+You will need the following installed on your machine before proceeding. Each item links to an official download page.
 
----
-
-## System Architecture
-
-The prototype supports three client interfaces, all backed by the same FastMCP server:
-
-| Client | Transport | Connection |
+| What | Why You Need It | How to Check |
 |---|---|---|
-| **Browser** | HTTP | React dashboard at `http://localhost:5173` |
-| **Claude Desktop** | stdio | Launched as a subprocess via MCP config (see [Integration](#claude-desktop--claude-code-integration)) |
-| **Claude Code CLI** | HTTP | `http://localhost:8000/mcp` as a streamable-HTTP MCP server |
+| **Python 3.10 or newer** | Runs the backend server | `python3 --version` |
+| **Node.js 18 or newer** | Runs the frontend dev server | `node --version` |
+| **Terraform CLI (v1.x)** | Used to generate and apply infrastructure code | `terraform --version` |
+| **Git** | To clone this repository | `git --version` |
+| **An AWS Account** | The app connects to real AWS resources | — |
+| **A Groq or Anthropic API key** | Powers the AI explanations and code generation | — |
+
+> **Not sure if something is installed?** Open a terminal and run the command in the "How to Check" column above. If you see a version number, it is installed. If you see "command not found", you need to install it first.
+
+### How to get a free Groq API key (recommended for development)
+
+1. Go to [console.groq.com](https://console.groq.com) and sign up for a free account
+2. Navigate to **API Keys** in the left sidebar
+3. Click **Create API Key**, give it a name, and copy the key — you will need it later
 
 ---
 
-## How the Prototype Works
+## Step 1 — Download the Code
 
-### Step 1 — Scan
-AWS credentials are provided via the settings panel. The system runs five parallel boto3 scanners across EC2, S3, IAM, Security Groups, and VPCs, populating the dashboard with live infrastructure state. Results auto-refresh every 90 seconds.
+Open a terminal and run:
 
-### Step 2 — Analyse
-A rule-based security engine applies 7 pre-defined checks to the scan results, assigns a severity level (HIGH / MEDIUM / LOW), and invokes an LLM to generate a plain-English explanation of each finding.
+```bash
+git clone <repository-url>
+cd aca-app-dev
+```
 
-### Step 3 — Fix & Approve
-Three remediation paths are provided for study: a direct SDK call (instant revoke), LLM-generated Terraform HCL, and an autonomous agent loop. In all cases a full `terraform plan` diff is presented before any change is applied. No infrastructure change is made without explicit approval — this human gate is a core design requirement of the research.
-
----
-
-## Technical Implementation
-
-### Infrastructure Scanning & Security Analysis
-- **AWS scanning** — EC2, S3, IAM, Security Groups, VPCs, and SG usage maps via ENIs; covers all major resource types and auto-refreshes every 90 seconds
-- **7-rule security engine** — open SSH/RDP, public S3, missing MFA, root account usage, over-permissive IAM, inactive users, default VPC; severity-ranked HIGH / MEDIUM / LOW with a composite 0–100 health score
-- **Direct remediation** — `revoke_open_ingress_rule` removes 0.0.0.0/0 rules for SSH/RDP directly via the AWS SDK as a baseline comparison to the Terraform approach
-- **Cost analysis** — current month spend, 3-month trend, per-service breakdown, 20%+ spike anomaly detection, and LLM-generated optimisation commentary
-
-### Terraform Pipeline
-- **HCL generation** — natural-language requests are translated into Terraform HCL; the LLM is first grounded with a live infrastructure scan to reference real VPC / SG / subnet IDs
-- **Syntax validation** — `terraform validate` runs automatically after every generation step
-- **Human-in-the-loop execution** — `terraform plan` is always run first and its diff surfaced to the user; `terraform apply` requires explicit approval; `terraform destroy` is available for rollback
-- **Remote S3 state** — when `TF_STATE_BUCKET` is set, state is stored in S3 with DynamoDB locking to explore concurrent-safe state management
-- **Plugin cache** — provider binaries (~727 MB) are downloaded once and hardlinked across executions to reduce setup time during development
-
-### LLM Integration & RAG
-- **Agentic loop** — an autonomous agent implements a scan → rank → generate → plan → summarise cycle, demonstrating end-to-end agentic behaviour with a mandatory human approval gate
-- **Infrastructure Q&A** — natural-language queries are answered with fresh scan data injected as context, augmented with up to 3 relevant RAG chunks
-- **RAG knowledge base** — ChromaDB vector store seeded with 5 AWS best-practice documents; custom PDFs or text files can be added and queried to study RAG grounding behaviour
-
-### Observability & State
-- **Execution log** — a persistent, file-locked JSON log records every plan/apply/destroy operation with timestamps, status, and full terminal output
-- **PEM key download** — EC2 instances created during experiments can download the generated `.pem` file from `/terraform/keys/{id}/{filename}`
-- **Workdir cleanup** — plan-only working directories older than 7 days are purged on startup to manage disk usage during extended development
+You should now be inside the project folder. You can confirm this by running `ls` — you should see folders named `backend` and `frontend`.
 
 ---
 
-## Prerequisites
+## Step 2 — Set Up the Backend (Python Server)
 
-| Requirement | Notes |
-|---|---|
-| Python 3.10+ | Backend runtime |
-| Node.js 18+ | Frontend build tooling |
-| Terraform CLI 1.x | Must be on `$PATH` — verify with `terraform --version` |
-| AWS account | Programmatic access key + secret key required for live testing |
-| LLM API key | Groq (free tier sufficient for development) **or** Anthropic |
+The backend is the engine of the application. It connects to AWS, runs security checks, and talks to the AI. Follow these steps carefully.
 
----
-
-## Setup & Running
-
-### Backend
+### 2.1 — Navigate into the backend folder
 
 ```bash
 cd backend
-
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-
-pip install -r requirements.txt
-
-cp .env.example .env
-nano .env                       # add your LLM API key
-
-uvicorn main:app --reload --port 8000
 ```
 
-The backend exposes the following interfaces:
+### 2.2 — Create a virtual environment
 
-| Interface | URL | Purpose |
-|---|---|---|
-| MCP endpoint | `POST http://localhost:8000/mcp` | Primary interface used by the React frontend and all MCP clients |
-| Swagger UI | `http://localhost:8000/docs` | Auto-generated test interface for every MCP tool |
-| Key download | `GET http://localhost:8000/terraform/keys/{id}/{file}` | PEM file download for EC2 experiments |
-| RAG upload | `POST http://localhost:8000/rag/documents/upload` | Multipart PDF / text file upload to the knowledge base |
-
-### Frontend
+A virtual environment is an isolated workspace for Python packages. This prevents the project's dependencies from conflicting with anything else on your machine.
 
 ```bash
-cd frontend
-npm install
-npm run dev
+python -m venv venv
 ```
 
-The UI is available at `http://localhost:5173`. All frontend–backend communication goes through `POST /mcp` — there are no separate REST calls for business logic, which was a deliberate architectural choice to validate MCP as a unified integration layer.
+This creates a new folder called `venv/` inside the backend directory. You only need to do this once.
+
+### 2.3 — Activate the virtual environment
+
+**On macOS / Linux:**
+```bash
+source venv/bin/activate
+```
+
+**On Windows:**
+```bash
+venv\Scripts\activate
+```
+
+> After activation, your terminal prompt should change to show `(venv)` at the beginning. This confirms the virtual environment is active. You must activate it every time you open a new terminal to run the backend.
+
+### 2.4 — Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+This downloads and installs all the Python libraries the backend needs. It may take a few minutes on first run.
+
+### 2.5 — Create the environment configuration file
+
+The app uses a `.env` file to store sensitive keys (API keys, AWS credentials). A template is provided — copy it to create your own:
+
+```bash
+cp .env.example .env
+```
+
+### 2.6 — Open and edit the `.env` file
+
+```bash
+vi .env
+```
+
+> **New to `vi`?** Press `i` to enter insert mode, make your edits, then press `Esc`, type `:wq`, and press `Enter` to save and quit. Alternatively, you can open the file in any text editor (e.g., VS Code, Notepad, TextEdit).
+
+At minimum, add your LLM API key. The file looks like this:
+
+```
+GROQ_API_KEY=your-groq-api-key-here
+ANTHROPIC_API_KEY=                    # leave blank if using Groq
+AWS_DEFAULT_REGION=us-east-1
+```
+
+A full list of available variables is in the [Environment Variables](#environment-variables) section below.
+
+### 2.7 — Start the backend server
+
+```bash
+python3 main.py
+```
+
+You should see output like:
+
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+The backend is now running. **Leave this terminal window open.** Open a new terminal window for the next step.
+
+> You can also visit `http://localhost:8000/docs` in a browser to see an auto-generated interactive API reference for every tool the system exposes.
 
 ---
 
-## First Run
+## Step 3 — Set Up the Frontend (Web Interface)
 
-1. Open `http://localhost:5173` in a browser.
-2. Log in — **username:** `admin` **password:** `demo2024`.
-3. Open **Settings** (top-right) → **Cloud Credentials** tab — enter your AWS Access Key ID, Secret Key, and region.
-4. On the **LLM Settings** tab, enter a Groq or Anthropic API key and select a model.
-5. Click **Scan** — all five AWS scanners run and populate the dashboard.
-6. Click **Analyse** on the Security panel to run the 7-rule engine and generate an LLM summary.
+Open a **new terminal window** (keep the backend terminal running).
 
-> **Note on credentials:** AWS credentials are held in memory only — they are never written to disk and are forwarded directly to boto3 at request time. The `admin / demo2024` login is a hardcoded stub for local development. This prototype is intended to run locally and should not be exposed to the public internet.
+### 3.1 — Navigate to the frontend folder
+
+From the project root:
+
+```bash
+cd frontend
+```
+
+### 3.2 — Install JavaScript dependencies
+
+```bash
+npm install
+```
+
+This downloads all the JavaScript libraries the interface needs. This may also take a few minutes on first run.
+
+### 3.3 — Start the frontend development server
+
+```bash
+npm run dev
+```
+
+You should see output like:
+
+```
+  VITE v5.x.x  ready in 500ms
+
+  ➜  Local:   http://localhost:5173/
+```
+
+The frontend is now running. Open `http://localhost:5173` in your browser.
+
+---
+
+## Step 4 — Using the Application
+
+### 4.1 — Log in
+
+When the app loads, you will be prompted to log in. Use these credentials:
+
+- **Username:** `admin`
+- **Password:** `demo2024`
+
+> These are hardcoded development credentials for local use only. The app is not intended to be deployed publicly.
+
+### 4.2 — Enter your AWS credentials
+
+1. Click the **Settings** icon in the top-right corner
+2. Go to the **Cloud Credentials** tab
+3. Enter your **AWS Access Key ID**, **AWS Secret Access Key**, and **Region** (e.g., `us-east-1`)
+
+> AWS credentials are held in memory only — they are never written to disk. If you restart the app, you will need to enter them again.
+
+### 4.3 — Enter your LLM API key
+
+1. Still in Settings, go to the **LLM Settings** tab
+2. Paste your Groq or Anthropic API key
+3. Select the model you want to use from the dropdown
+4. Click **Save**
+
+### 4.4 — Run a scan
+
+Click the **Scan** button on the dashboard. The system will connect to AWS and retrieve information about your EC2 instances, S3 buckets, IAM users, Security Groups, and VPCs. This takes a few seconds.
+
+### 4.5 — Analyse security findings
+
+Once the scan is complete, click **Analyse** on the Security panel. The system will apply 7 built-in security rules to your infrastructure and generate an AI-written plain-English summary of any issues found.
 
 ---
 
 ## Environment Variables
 
-All variables are configured in `backend/.env` (copy from `backend/.env.example`):
+All variables live in `backend/.env`. Copy from `backend/.env.example` to get started.
 
 | Variable | Required | Description |
 |---|---|---|
-| `GROQ_API_KEY` | One of these | Groq API key — used when model is set to `groq` |
-| `ANTHROPIC_API_KEY` | One of these | Anthropic API key — used when model is set to `anthropic` |
-| `AWS_DEFAULT_REGION` | No | Default AWS region (default: `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` | No | Server-side AWS key for testing without UI credential entry |
+| `GROQ_API_KEY` | One of these two | Groq API key — used when model provider is set to Groq |
+| `ANTHROPIC_API_KEY` | One of these two | Anthropic API key — used when model provider is set to Anthropic |
+| `AWS_DEFAULT_REGION` | No | Default AWS region if not set in the UI (default: `us-east-1`) |
+| `AWS_ACCESS_KEY_ID` | No | Server-side AWS key — alternative to entering credentials in the UI |
 | `AWS_SECRET_ACCESS_KEY` | No | Server-side AWS secret |
-| `TF_STATE_BUCKET` | No | S3 bucket for Terraform state (enables S3 backend when set) |
+| `TF_STATE_BUCKET` | No | S3 bucket for Terraform remote state storage (optional, see below) |
 | `TF_STATE_LOCK_TABLE` | No | DynamoDB table for state locking (default: `terraform-state-lock`) |
 | `TF_STATE_REGION` | No | Region for the S3 bucket and DynamoDB table (default: `us-east-1`) |
-| `DEBUG` | No | Set `true` for FastAPI debug/reload mode during development |
+| `DEBUG` | No | Set to `true` to enable FastAPI auto-reload during development |
 
 ---
 
-## Terraform S3 State Backend (Optional)
+## Optional — Terraform S3 Remote State
 
-By default Terraform writes state locally to `terraform_workdirs/`. The S3 backend configuration was implemented to explore durable, concurrent-safe state management as an extension to the core prototype.
-
-### Setup script
+By default, Terraform stores its state locally inside `backend/terraform_workdirs/`. If you want to explore durable, concurrent-safe remote state management (as discussed in the dissertation), you can set up an S3 backend with one command:
 
 ```bash
-# Auto-names the bucket using the AWS account ID
+# From the project root
 ./setup_s3_backend.sh
+```
 
-# Specify a custom name / region
-./setup_s3_backend.sh --bucket my-tfstate-bucket --region eu-west-1
+This script will:
+1. Create an S3 bucket with versioning and encryption enabled
+2. Create a DynamoDB table for concurrent-apply locking
+3. Automatically write the bucket name into `backend/.env`
 
-# Dry-run — previews actions without making changes
+To preview what the script will do without making any changes:
+
+```bash
 ./setup_s3_backend.sh --dry-run
 ```
 
-The script:
-1. Creates an S3 bucket with versioning, AES-256 server-side encryption, and all public access blocked
-2. Creates a DynamoDB table (`terraform-state-lock`) for concurrent-apply locking
-3. Writes `TF_STATE_BUCKET`, `TF_STATE_LOCK_TABLE`, and `TF_STATE_REGION` into `backend/.env`
-
-Safe to run multiple times — it skips resources that already exist.
-
-### Verifying S3 state
-
-```bash
-# Restart the backend to pick up the updated .env
-cd backend && uvicorn main:app --reload --port 8000
-
-# After a plan + apply, confirm state was written to S3
-aws s3 ls s3://$(grep TF_STATE_BUCKET backend/.env | cut -d= -f2)/ --recursive
-```
-
-### Implementation detail
-
-When `TF_STATE_BUCKET` is present, `execution_service.py` generates a `backend.tf` alongside `main.tf` before `terraform init`:
-
-```hcl
-terraform {
-  backend "s3" {
-    bucket         = "<bucket>"
-    key            = "<execution_id>/terraform.tfstate"
-    region         = "<region>"
-    dynamodb_table = "terraform-state-lock"
-    encrypt        = true
-  }
-}
-```
-
-Each execution gets an isolated state key (`exec_YYYYMMDD_HHMMSS_xxxxxxxx/terraform.tfstate`). The DynamoDB lock is acquired at the start of `apply` and released on completion.
-
-| | Local mode (default) | S3 mode |
-|---|---|---|
-| State stored in | `backend/terraform_workdirs/` | S3 bucket |
-| Concurrent apply protection | None | DynamoDB lock |
-| State survives process restart | Yes (local files) | Yes (S3) |
-| Multi-machine safe | No | Yes |
-
 ---
 
-## Claude Desktop & Claude Code Integration
+## Optional — Claude Desktop / Claude Code Integration
 
-One research question was whether the same MCP server could serve both a browser client and AI coding assistants without modification. The following configurations demonstrate this.
+The same backend MCP server can be connected to Claude Desktop or Claude Code, allowing you to interact with your AWS infrastructure directly through an AI chat interface.
 
 ### Claude Code (HTTP transport)
 
-```bash
-# Start the server
-cd backend && python mcp_server.py
+Add the following as a streamable-HTTP MCP server in your Claude Code settings:
 
-# Add to Claude Code MCP config
-# URL: http://localhost:8000/mcp   type: streamable-http
+```
+URL: http://localhost:8000/mcp
+Type: streamable-http
 ```
 
 ### Claude Desktop (stdio transport)
 
-Claude Desktop launches the server as a subprocess — no manual start needed:
+Add the following to your Claude Desktop `claude_desktop_config.json` file. Replace the paths with the absolute paths on your machine:
 
 ```json
 {
   "mcpServers": {
     "agentic-cloud-assistant": {
-      "command": "/absolute/path/to/venv/bin/python",
+      "command": "/absolute/path/to/backend/venv/bin/python",
       "args": ["/absolute/path/to/backend/mcp_server.py", "--stdio"],
       "env": {
         "PYTHONPATH": "/absolute/path/to/backend",
-        "AWS_ACCESS_KEY_ID": "your-key-id",
-        "AWS_SECRET_ACCESS_KEY": "your-secret",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "GROQ_API_KEY": "your-groq-key",
-        "ANTHROPIC_API_KEY": "your-anthropic-key"
+        "GROQ_API_KEY": "your-groq-api-key"
       }
     }
   }
 }
 ```
 
-See `claude_desktop_config_example.json` for the full template.
+See `claude_desktop_config_example.json` in the project root for a complete template.
 
 ---
 
-## MCP Tool Reference
+## Troubleshooting
 
-All 30+ tools are callable via `POST /mcp` (JSON-RPC `tools/call`) or through the Swagger UI at `/docs`.
-
-### Group A — AWS Scanning
-
-| Tool | Description |
-|---|---|
-| `health_check` | Returns server status and confirms MCP connection |
-| `full_aws_scan` | Runs all five scanners (EC2, S3, IAM, SGs, VPCs) in sequence |
-| `scan_ec2_instances` | EC2 instances with state, IPs, and attached security group IDs |
-| `scan_s3_buckets` | S3 buckets with public-access status |
-| `scan_iam_users` | IAM users with MFA status and last-login date |
-| `scan_security_groups_detail` | Security groups flagged for dangerous internet-facing rules |
-| `scan_vpc_detail` | VPCs with CIDR, default flag, and subnet count |
-
-### Group B — Security & Cost
-
-| Tool | Description |
-|---|---|
-| `scan_sg_usage_tool` | Maps every SG to attached resources (EC2, RDS, ALB, Lambda, ECS, ElastiCache) via ENIs; identifies unused SGs |
-| `analyse_security_findings` | Runs 7 built-in rules against a pre-fetched scan dict |
-| `run_security_analysis_with_summary` | Full scan + rules + LLM plain-English summary in one call |
-| `estimate_costs` | Cost Explorer data: current month, 3-month trend, per-service, anomaly |
-| `get_cost_with_summary` | Cost data + LLM optimisation recommendations in one call |
-
-### Group C — Terraform
-
-| Tool | Description |
-|---|---|
-| `generate_terraform_hcl` | Generate HCL from a resource type + config dict |
-| `generate_terraform_from_request` | Generate HCL from plain English; scans existing infra for context first |
-| `validate_terraform_plan` | Validate HCL syntax via `terraform validate` without touching AWS |
-| `run_terraform_plan_mcp` | Write HCL to a working dir, run `terraform init + plan` (S3 backend or local), return diff and execution ID |
-| `run_terraform_apply_mcp` | Apply or reject a previously planned execution (human gate: `approved: bool`) |
-| `get_execution_history_tool` | Return all plan/apply/destroy records from the execution log |
-| `summarise_plan_for_human` | Parse raw plan output into a plain-English approval summary |
-
-### Group D — Chat & Agent
-
-| Tool | Description |
-|---|---|
-| `aws_chat` | Converse with an LLM about live AWS state; injects a full scan as context, augmented with relevant knowledge base chunks |
-| `agent_run` | Autonomous agent: scan → pick top finding → generate fix → plan → summarise |
-| `agent_approve` | Human approval gate for agent-generated plans |
-| `revoke_open_ingress_rule` | Direct AWS SDK fix — removes all 0.0.0.0/0 rules for a given port on a security group |
-| `mark_execution_resolved` | Mark a finding execution as resolved in the audit log (audit-safe, no deletion) |
-| `rollback_execution` | Run `terraform destroy` on a completed execution's saved main.tf |
-
-### Group E — RAG Knowledge Base
-
-| Tool | Description |
-|---|---|
-| `rag_query_tool` | Semantic search over ChromaDB + LLM-grounded answer |
-| `rag_list_documents` | List all documents and chunk counts in the knowledge base |
-| `rag_add_text_document` | Add a raw text document to ChromaDB |
-| `rag_upload_file` | Add a PDF or text file (base64-encoded) to ChromaDB; PDFs parsed with PyPDF2 |
-| `rag_delete_document` | Delete a document and all its chunks |
-
-### MCP Resources (pulled on demand)
-
-| URI | Description |
-|---|---|
-| `aws://findings/{region}` | Latest security findings for a region (TTL-cached 5 min) |
-| `aws://cost-summary/{region}` | Latest cost summary for the account (TTL-cached 5 min) |
+| Problem | Likely Cause | Fix |
+|---|---|---|
+| `command not found: python3` | Python is not installed or not on PATH | Install Python 3.10+ from python.org |
+| `command not found: npm` | Node.js is not installed | Install Node.js 18+ from nodejs.org |
+| `command not found: terraform` | Terraform is not installed or not on PATH | Install from developer.hashicorp.com/terraform |
+| Backend starts but frontend shows errors | Backend not running | Ensure `python3 main.py` is still running in the other terminal |
+| `pip install` fails | Virtual environment not activated | Run `source venv/bin/activate` first |
+| AWS scan returns no results | Credentials not entered or incorrect | Check Settings → Cloud Credentials in the UI |
+| AI summary not generated | LLM API key missing or invalid | Check Settings → LLM Settings or verify `backend/.env` |
 
 ---
 
-## Project Structure
+## Project Structure (Summary)
 
 ```
 aca-app-dev/
-│
-├── README.md
-├── setup_s3_backend.sh              # One-shot S3 state bucket + DynamoDB lock table setup
-├── claude_desktop_config_example.json  # Claude Desktop / Claude Code MCP config template
-│
-├── backend/
-│   ├── main.py                      # FastAPI app — mounts MCP server, serves /docs, key downloads, RAG upload
-│   ├── mcp_server.py                # All MCP tools and 2 MCP resources (Groups A–E)
-│   ├── docs_generator.py            # Auto-registers every MCP tool as a Swagger POST /tools/{name}
-│   ├── benchmark.py                 # Endpoint latency benchmarking
-│   ├── requirements.txt
-│   ├── .env.example
-│   ├── providers_init.tf            # Terraform provider pinning for local validation
-│   ├── execution_log.json           # Persistent Terraform execution history (file-locked JSON)
-│   ├── terraform_workdirs/          # Per-execution working dirs (main.tf, backend.tf, tfplan, .terraform/)
-│   ├── terraform_plugin_cache/      # Shared provider plugin cache (~727 MB, hardlinked across executions)
-│   ├── tests/
-│   │   ├── test_rag_functional.py   # 41 unit tests — RAG chunking, search, delete, prompt building
-│   │   ├── test_rag_integration.py  # 35 integration tests — live HTTP API for all RAG endpoints
-│   │   ├── test_security_analyzer.py # 28 unit tests — all 7 security rules and run_security_analysis
-│   │   └── test_ollama_status.py    # 5 unit tests — Ollama probe states and pull stream handling
-│   ├── services/
-│   │   ├── aws_scanner.py           # boto3 — EC2, S3, IAM, SGs, VPCs, SG usage, direct revoke
-│   │   ├── security_analyzer.py     # 7-rule security engine + severity scoring (HIGH/MEDIUM/LOW)
-│   │   ├── cost_analyzer.py         # Cost Explorer queries + anomaly detection
-│   │   ├── terraform_service.py     # HCL generation (Groq/Anthropic/Ollama), validation, summarisation
-│   │   ├── execution_service.py     # terraform plan/apply/destroy subprocesses + S3 backend + file-locked log
-│   │   └── llm_service.py           # Groq / Anthropic / Ollama client wrappers
-│   └── rag/
-│       ├── knowledge_base.py        # ChromaDB wrapper — all-MiniLM-L6-v2, chunk size 400 / overlap 50
-│       ├── rag_service.py           # Query pipeline — cosine search, relevance threshold 0.3, prompt augmentation
-│       └── seed_knowledge.py        # Pre-populates knowledge base with 5 seed documents on first start
-│
-├── frontend/
-│   ├── index.html
-│   ├── package.json
-│   ├── vite.config.js               # Dev server with proxy → backend:8000
-│   └── src/
-│       ├── App.jsx                  # Root component — provider tree, routing, settings modal
-│       ├── main.jsx
-│       ├── api/
-│       │   └── mcpClient.js         # JSON-RPC 2.0 MCP client — SSE streaming, session, retry
-│       ├── contexts/
-│       │   ├── ApiKeyContext.jsx    # Global credential state (AWS keys, LLM keys, region)
-│       │   └── AuthContext.jsx      # Login session state and logout handler
-│       ├── utils/
-│       │   ├── scoring.js           # Security health score (0–100) from findings
-│       │   └── constants.js
-│       └── components/
-│           ├── Dashboard.jsx        # Main layout — panel grid, scan orchestration, auto-refresh
-│           ├── LoginPage.jsx
-│           ├── SettingsModal.jsx    # AWS credentials + LLM settings modal
-│           ├── ui/
-│           │   ├── Topbar.jsx       # Nav bar with health score badge and settings button
-│           │   ├── ErrorBoundary.jsx
-│           │   ├── Field.jsx
-│           │   ├── Logo.jsx
-│           │   └── DarkTooltip.jsx
-│           └── panels/
-│               ├── InfrastructurePanel.jsx   # EC2 / S3 / IAM / SG / VPC summary cards
-│               ├── SecurityPanel.jsx         # Findings list, health score, fix buttons
-│               ├── CostPanel.jsx             # Cost breakdown, trend chart, anomaly alert
-│               ├── ChatPanel.jsx             # LLM chat with conversation memory
-│               ├── TerraformPanel.jsx        # HCL generator → plan → approve → apply
-│               ├── ExecutionHistoryPanel.jsx # Plan/apply/destroy history with rollback
-│               ├── SecurityAgentPanel.jsx    # Agentic remediation loop UI
-│               └── KnowledgeBasePanel.jsx    # RAG search, document upload/delete
-│
-└── aca-diagrams/                    # Architecture and design diagrams (PNG)
-    ├── HIGH_LEVEL_SYSTEM_ARCHITECTURE.png
-    ├── SEQUENCE_DIAGRAM_SCAN_TO_FIX.png
-    ├── ACTIVITY_DIAGRAM_TERRAFORM_WORKFLOW.png
-    └── ...
+├── backend/               # Python FastAPI + FastMCP server
+│   ├── main.py            # Application entry point
+│   ├── mcp_server.py      # All MCP tools (scanning, security, Terraform, RAG, chat)
+│   ├── requirements.txt   # Python dependencies
+│   ├── .env.example       # Environment variable template
+│   └── services/          # AWS scanner, security engine, cost analyser, LLM wrappers
+├── frontend/              # React web interface
+│   ├── package.json       # JavaScript dependencies
+│   └── src/               # UI components and panels
+├── aca-diagrams/          # Architecture and sequence diagrams
+└── setup_s3_backend.sh    # One-command S3 state backend setup
 ```
-
----
