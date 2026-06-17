@@ -25,4 +25,4 @@ MODELS = [
     },
 ]
 
-DEFAULT_MODEL = "gpt-oss:120b-cloud"
+DEFAULT_MODEL = "jensonodigie/Jenteck-GPT:latest"

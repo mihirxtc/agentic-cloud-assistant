@@ -408,7 +408,7 @@ def scan_vpc(region: str = "us-east-1", credentials: dict = None) -> dict:
         all_vpcs = [v for page in vpc_paginator.paginate() for v in page["Vpcs"]]
 
         subnet_paginator = ec2_client.get_paginator("describe_subnets")
-        subnet_counts: defaultdict = defaultdict(int)
+        subnet_counts: defaultdict = defaultdict(int) # counts subnets per vpc!
         for page in subnet_paginator.paginate():
             for sn in page["Subnets"]:
                 subnet_counts[sn["VpcId"]] += 1
@@ -590,7 +590,7 @@ def scan_sg_usage(region: str = "us-east-1", credentials: dict = None) -> dict:
         all_sgs = [sg for page in sg_paginator.paginate() for sg in page["SecurityGroups"]]
         sg_usage = {sg["GroupId"]: [] for sg in all_sgs}
 
-        # Walk every ENI — one ENI can reference multiple SGs
+        # Walk every ENI — one ENI (elastic network interface) can reference multiple SGs
         eni_paginator = ec2.get_paginator("describe_network_interfaces")
         for page in eni_paginator.paginate():
             for eni in page["NetworkInterfaces"]:
@@ -628,7 +628,7 @@ def scan_sg_usage(region: str = "us-east-1", credentials: dict = None) -> dict:
                             "eni_id":        eni_id,
                         })
 
-        unused_ids = [sg_id for sg_id, usages in sg_usage.items() if not usages]
+        unused_ids = [sg_id for sg_id, usages in sg_usage.items() if not usages]    # security grps attached to no resources
 
         return {
             "status":        "ok",
@@ -671,13 +671,13 @@ def revoke_sg_ingress_rule(
             # Match rules that cover the target port (including all-protocol rules)
             proto = perm.get("IpProtocol", "")
             port_match = (
-                proto == "-1"
-                or (isinstance(from_port, int) and isinstance(to_port, int) and from_port <= port <= to_port)
+                proto == "-1"   # all protocol rule, covers all ports
+                or (isinstance(from_port, int) and isinstance(to_port, int) and from_port <= port <= to_port)   # explicit port range, covers tartget port
             )
             if not port_match:
                 continue
 
-            open_v4 = [r for r in perm.get("IpRanges",   []) if r.get("CidrIp")   == "0.0.0.0/0"]
+            open_v4 = [r for r in perm.get("IpRanges",   []) if r.get("CidrIp")   == "0.0.0.0/0"]   # open internet CIDR entries
             open_v6 = [r for r in perm.get("Ipv6Ranges", []) if r.get("CidrIpv6") == "::/0"]
 
             if open_v4 or open_v6:

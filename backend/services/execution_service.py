@@ -14,16 +14,10 @@ _BACKEND_DIR = Path(__file__).parent.parent
 WORKDIR_BASE = _BACKEND_DIR / "terraform_workdirs"
 EXECUTION_LOG = _BACKEND_DIR / "execution_log.json"
 
-# Shared provider plugin cache — all executions hardlink to the same binaries
-# instead of downloading ~727 MB per workdir. On the same filesystem, Terraform
-# uses hardlinks so disk usage is the size of one copy (~727 MB total), not
-# 727 MB × number of executions.
+# Shared provider plugin cache - hardlink to the same binaries instead of new downloads per workdir
 PLUGIN_CACHE_DIR = _BACKEND_DIR / "terraform_plugin_cache"
 
-# File-level lock that serialises all read-modify-write operations on the log.
-# Two concurrent plan requests arriving at the same millisecond would otherwise
-# both read the same state, each append their entry, and the second write would
-# silently overwrite the first — losing the earlier execution record.
+# File-level lock that serialises all read-modify-write operations on the log
 _LOG_LOCK = FileLock(str(EXECUTION_LOG) + ".lock", timeout=10)
 
 
@@ -62,10 +56,11 @@ def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | Non
         workdir = get_working_dir(execution_id)
         env = _build_env(aws_creds)
 
+        # create workdir and write hcl file
         tf_path = workdir / "main.tf"
         tf_path.write_text(hcl_config, encoding="utf-8")
 
-        # Write S3 backend config if configured; fall back to local state if not.
+        # write S3 backend config if configured; fall back to local state if not.
         has_s3_backend = _write_s3_backend_config(workdir, execution_id)
         init_cmd = (
             ["terraform", "init", "-no-color"]
@@ -73,9 +68,7 @@ def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | Non
             else ["terraform", "init", "-backend=false", "-no-color"]
         )
 
-        # Remove any stale lock file so init always regenerates it from the current
-        # plugin cache. A leftover lock file with old checksums causes "Required plugins
-        # are not installed" even though the providers are physically present.
+        # delete stale lock file and run terraform init
         (workdir / ".terraform.lock.hcl").unlink(missing_ok=True)
 
         init_result = subprocess.run(
@@ -97,6 +90,7 @@ def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | Non
                 "resources_to_destroy": 0,
             }
 
+        # runs terraform plan 
         plan_result = subprocess.run(
             ["terraform", "plan", "-out=tfplan", "-no-color"],
             capture_output=True,
@@ -108,9 +102,7 @@ def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | Non
 
         plan_output = plan_result.stdout + plan_result.stderr
 
-        # Provider checksum mismatch: cached binary diverged from registry hashes.
-        # Clear the stale provider from the shared cache, wipe .terraform/, and retry
-        # init+plan once so the next download is authoritative.
+        # checksum mismatch recovery phase
         if plan_result.returncode != 0 and "does not match any of the checksums" in plan_output:
             shutil.rmtree(PLUGIN_CACHE_DIR, ignore_errors=True)
             PLUGIN_CACHE_DIR.mkdir(exist_ok=True)
@@ -161,6 +153,7 @@ def run_terraform_apply(execution_id: str, aws_creds: dict | None = None) -> dic
         tfplan = workdir / "tfplan"
         env = _build_env(aws_creds)
 
+        # check if tfplan exist
         if not tfplan.exists():
             return {
                 "success": False,
@@ -171,6 +164,7 @@ def run_terraform_apply(execution_id: str, aws_creds: dict | None = None) -> dic
                 "resources_applied": [],
             }
 
+        # run terraform apply with saved tfplan
         apply_result = subprocess.run(
             ["terraform", "apply", "-auto-approve", "-no-color", "tfplan"],
             capture_output=True,
@@ -183,18 +177,14 @@ def run_terraform_apply(execution_id: str, aws_creds: dict | None = None) -> dic
         apply_output = apply_result.stdout + apply_result.stderr
         success = apply_result.returncode == 0
 
-        # Collect .pem key files written by local_file resources (only on success).
+        # .pem key files written by local_file resources on sucess
         key_files = []
         if success:
             for entry in workdir.iterdir():
                 if entry.suffix == ".pem" and entry.is_file():
                     key_files.append({"name": entry.name})
 
-        # Always clean up provider plugins and the consumed plan binary —
-        # regardless of success/failure. Previously this was inside `if success:`
-        # which left ~727 MB of provider binaries stranded on failed applies.
-        # main.tf and terraform.tfstate are kept: main.tf for rollback,
-        # tfstate because Terraform needs it to track created resources.
+        # always clean up provider plugins
         _cleanup_workdir_plugins(workdir)
 
         return {
@@ -231,8 +221,6 @@ def run_terraform_destroy(execution_id: str, aws_creds: dict | None = None) -> d
                 "destroy_output": f"No main.tf found for execution '{execution_id}'. Cannot destroy.",
             }
 
-        # If backend.tf is present the plan used S3 state — init without -backend=false
-        # so Terraform fetches state from S3. Otherwise use local -backend=false mode.
         backend_tf = workdir / "backend.tf"
         init_cmd = (
             ["terraform", "init", "-no-color"]
@@ -240,7 +228,7 @@ def run_terraform_destroy(execution_id: str, aws_creds: dict | None = None) -> d
             else ["terraform", "init", "-backend=false", "-no-color"]
         )
 
-        # Remove stale lock file for the same reason as in run_terraform_plan.
+        # remove stale lock file before init
         (workdir / ".terraform.lock.hcl").unlink(missing_ok=True)
 
         init_result = subprocess.run(
@@ -280,7 +268,7 @@ def get_key_file(execution_id: str, filename: str) -> bytes:
     workdir = WORKDIR_BASE / execution_id
     key_path = (workdir / filename).resolve()
 
-    # Ensure the resolved path is still inside the expected workdir
+    # resolve path still inside expected dir ensure
     if workdir.resolve() not in key_path.parents:
         raise ValueError("Path traversal detected")
 
@@ -378,7 +366,7 @@ def cleanup_workdir_plugins(execution_id: str) -> None:
 def purge_old_workdirs(older_than_days: int = 7) -> dict:
     """Delete workdirs without a terraform.tfstate that are older than the threshold. Applied workdirs are skipped to preserve rollback capability."""
     import time as _time
-    cutoff = _time.time() - older_than_days * 86400
+    cutoff = _time.time() - older_than_days * 86400 # 7 days 
     removed = 0
     freed = 0
     if not WORKDIR_BASE.exists():

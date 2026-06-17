@@ -225,7 +225,7 @@ def check_unrestricted_traffic(security_groups_data: dict) -> list:
             sg_name = sg.get("name", "unknown")
 
             for entry in sg.get("open_to_internet", []):
-                if entry.get("protocol") == "-1":
+                if entry.get("protocol") == "-1":   # allow all protocols
                     finding_id = f"UNRESTRICTED_ALL_TRAFFIC-{sg_id}-{i}"
 
                     findings.append(

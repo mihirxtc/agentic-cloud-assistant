@@ -86,6 +86,100 @@ async def chat_with_groq(
         return f"Error contacting Groq: {str(e)}"
 
 
+
+
+
+async def chat_with_groq(
+    message: str, scan_data: dict, history: list = None, api_key: str = None
+) -> str:
+    """Send a message to the Groq API with AWS scan data injected as system context."""
+
+    if history is None:
+        history = []
+
+    if api_key and api_key.strip():
+        resolved_key = api_key.strip()
+    else:
+        resolved_key = os.getenv("GROQ_API_KEY")
+
+    if not resolved_key:
+        return (
+            "No Groq API key provided. Please add GROQ_API_KEY to .env "
+            "or enter your key in the chat interface."
+        )
+
+    system_prompt = (
+        "You are a friendly senior cloud management assistant. "
+        "Answer the user's questions in plain, conversational English. "
+        "You have been given live data about their AWS account — use it to give accurate, specific answers.\n\n"
+        "AWS ACCOUNT DATA:\n"
+        f"{json.dumps(scan_data, indent=2, default=str)}\n\n"
+        "DATA GUIDE — key fields to know:\n"
+        "- sg_usage.sg_usage: maps every security group ID to a list of attached resources. "
+        "An empty list means that security group is unused and safe to review for deletion.\n"
+        "- sg_usage.unused_sg_ids: pre-computed list of security group IDs with zero attached resources.\n"
+        "- sg_usage.unused_count: total number of unused security groups.\n"
+        "- ec2.instances[].security_group_ids: which SGs each EC2 instance uses.\n\n"
+        "STRICT RULES:\n"
+        "- Respond ONLY in natural English sentences — never paste JSON, code blocks, or raw data into your reply\n"
+        "- Be specific: mention counts, resource IDs, and names by extracting them from the data above\n"
+        "- Be concise — 1 to 4 sentences unless the user asks for detail\n"
+        "- If the data does not contain what they asked, say so plainly\n"
+        "- Never say 'According to the data' or quote field names like 'count' or 'status'"
+    )
+
+    clean_history = [
+        {"role": m["role"], "content": m.get("content") or m.get("text", "")}
+        for m in history
+        if m.get("role") in ("user", "assistant")
+    ]
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages = messages + clean_history
+    messages.append({"role": "user", "content": message})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {resolved_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "meta/llama-3.1-8b",
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 1024,
+                },
+            )
+
+            data = response.json()
+
+            if response.status_code != 200:
+                error_message = data.get("error", {}).get("message", str(data))
+                return f"Groq API error ({response.status_code}): {error_message}"
+
+            return data["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        return f"Error contacting Groq: {str(e)}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 async def chat_with_ollama(
     message: str,
     scan_data: dict,
@@ -245,6 +339,22 @@ async def chat_with_ollama(
 
     except Exception as e:
         return f"Ollama error: {type(e).__name__}: {str(e)}"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 async def prompt_llm(

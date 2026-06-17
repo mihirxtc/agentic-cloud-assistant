@@ -63,11 +63,11 @@ def query_knowledge_base(
     augmented_prompt = build_augmented_prompt(query, relevant_chunks)
     return {
         "query": query,
-        "chunks_found": len(raw_chunks),
-        "chunks_used": len(relevant_chunks),
+        "chunks_found": len(raw_chunks),    # total chunks retrieved from the knowledge base
+        "chunks_used": len(relevant_chunks),    # chunks after relevance threshold and optional resource filter
         "sources": sources,
         "augmented_prompt": augmented_prompt,
-        "raw_chunks": relevant_chunks
+        "raw_chunks": relevant_chunks   # return dict contains actual chunk text and metadata
     }
 
 RAG_TOOL_DEFINITION = {

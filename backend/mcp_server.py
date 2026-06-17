@@ -210,6 +210,61 @@ async def run_security_analysis_with_summary(
     }
 
 
+
+@mcp.tool()
+async def run_security_analysis_with_summary1(
+    region: str = "us-east-1",
+    model: str = "groq",
+    api_key: str = "",
+    ollama_model_name: str = DEFAULT_MODEL,
+) -> dict:
+    """Scan AWS, run security rules, and generate an LLM plain-English summary."""
+    scan_data = {
+        "ec2": scan_ec2(region=region),
+        "s3": scan_s3(),
+        "iam": scan_iam(),
+        "security_groups": scan_security_groups(region=region),
+        "vpc": scan_vpc(region=region),
+    }
+
+    findings = run_security_analysis(scan_data)
+    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for f in findings:
+        sev = f.get("severity", "LOW")
+        counts[sev] = counts.get(sev, 0) + 1
+
+    if findings:
+        summary_prompt = (
+            f"You are an AWS security expert. Summarise these {len(findings)} "
+            f"security findings in 2-3 concise paragraphs for a cloud engineer:\n\n"
+            + json.dumps(
+                [
+                    {
+                        "severity": f.get("severity"),
+                        "title": f.get("title"),
+                        "resource_id": f.get("resource_id"),
+                        "recommendation": f.get("recommendation"),
+                    }
+                    for f in findings
+                ],
+                indent=2,
+            )
+        )
+        llm_summary = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
+    else:
+        llm_summary = "No security issues found. Your AWS infrastructure looks clean."
+
+    return {
+        "findings": findings,
+        "severity_counts": counts,
+        "total_findings": len(findings),
+        "llm_summary": llm_summary,
+    }
+
+
+
+
+
 @mcp.tool()
 def estimate_costs(region: str = "us-east-1", time_period_days: int = 30) -> dict:
     """Retrieve AWS spend data and detect cost anomalies via Cost Explorer."""

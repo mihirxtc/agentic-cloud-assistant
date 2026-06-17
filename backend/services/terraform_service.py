@@ -13,9 +13,6 @@ from groq import Groq
 # execution_service, so providers downloaded during plan/apply are reused here.
 _PLUGIN_CACHE_DIR = Path(__file__).parent.parent / "terraform_plugin_cache"
 
-# TERRAFORM_TOOL is still used by generate_terraform_with_anthropic to force
-# structured output (tool_choice) from the Anthropic API. It is NOT the old
-# Tool Use API agentic loop — that pattern has been removed.
 TERRAFORM_TOOL = {
     "name": "generate_terraform",
     "description": "Generate complete, valid Terraform HCL for an AWS resource.",
@@ -420,7 +417,7 @@ Reply in this exact format — no other text:
         "description": meta.get("description", ""),
     }
 
-
+# orchestrator function, routes to right provider, validates nd retries once if invalid 
 async def generate_terraform(request: str, model: str, api_key: str, existing_infra: str = "") -> dict:
     """Route to the correct LLM provider, validate the generated HCL, and return a structured result dict."""
     try:

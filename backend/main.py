@@ -23,6 +23,7 @@ app = FastAPI(
     ),
     version="2.0.0",
     lifespan=_mcp_http_app.lifespan,
+    redirect_slashes=False,
 )
 
 app.add_middleware(
