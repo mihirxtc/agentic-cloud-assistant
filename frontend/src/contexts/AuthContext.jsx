@@ -1,33 +1,28 @@
-import { createContext, useContext, useState } from 'react'
-
-const AuthContext = createContext(null)
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import { AuthContext } from './useAuth'
+import { getSession, restoreSession, signIn, signOut, subscribeSession } from '../api/session'
 
 export function AuthProvider({ children }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    try { return localStorage.getItem('aca_auth') === 'true' } catch { return false }
-  })
+  const session = useSyncExternalStore(subscribeSession, getSession)
+  const [error, setError] = useState(null)
 
-  function login(username, password) {
-    if (username === 'admin' && password === 'mscProject@DMU') {
-      setIsAuthenticated(true)
-      try { localStorage.setItem('aca_auth', 'true') } catch {}
-      return true
-    }
-    return false
-  }
+  useEffect(() => {
+    let active = true
+    restoreSession().catch((err) => { if (active) setError(err.message) })
+    return () => { active = false }
+  }, [])
 
-  function logout() {
-    setIsAuthenticated(false)
-    try { localStorage.clear() } catch {}
+  async function retry() {
+    setError(null)
+    try { await restoreSession() } catch (err) { setError(err.message) }
   }
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, login, logout }}>
+    <AuthContext.Provider value={{
+      isAuthenticated: !!session?.authenticated, checkingSession: session === undefined,
+      sessionError: error, retrySession: retry, login: signIn, logout: signOut,
+    }}>
       {children}
     </AuthContext.Provider>
   )
-}
-
-export function useAuth() {
-  return useContext(AuthContext)
 }

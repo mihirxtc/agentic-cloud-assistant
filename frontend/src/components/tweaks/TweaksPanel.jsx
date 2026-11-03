@@ -1,13 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-
-export function useTweaks(defaults) {
-  const [values, setValues] = useState(defaults)
-  const setTweak = useCallback((key, val) => {
-    setValues((prev) => ({ ...prev, [key]: val }))
-    window.parent.postMessage({ type: '__edit_mode_set_keys', edits: { [key]: val } }, '*')
-  }, [])
-  return [values, setTweak]
-}
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 
 export function TweakSection({ label, children }) {
   return (
@@ -58,7 +49,7 @@ export function TweakRadio({ label, value, options, onChange }) {
   const idx                    = Math.max(0, opts.findIndex((o) => o.value === value))
   const n                      = opts.length
   const valueRef               = useRef(value)
-  valueRef.current             = value
+  useLayoutEffect(() => { valueRef.current = value }, [value])
 
   const segAt = (clientX) => {
     const r     = trackRef.current.getBoundingClientRect()
@@ -199,7 +190,7 @@ export default function TweaksPanel({ title = 'Tweaks', children }) {
   if (!open) return null
   return (
     <div ref={dragRef} className="twk-panel"
-      style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+      style={{ right: 16, bottom: 16 }}>
       <div className="twk-hd" onMouseDown={onDragStart}>
         <b>{title}</b>
         <button className="twk-x" aria-label="Close tweaks"

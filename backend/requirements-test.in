@@ -1,0 +1,15 @@
+# Offline tests: rule functions, mocked providers, storage, and HTTP/MCP routes.
+# No embedding stack, AWS credentials, running server, or model download required.
+pytest
+httpx
+python-dotenv
+fastapi
+fastmcp
+boto3
+python-dateutil
+anthropic
+groq
+filelock
+cachetools
+python-multipart
+python-hcl2

@@ -1,18 +1,18 @@
-import json
 import os
+import json
 import re
 import shutil
 import subprocess
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
-from filelock import FileLock
+from services.storage import get_execution_store
+from services.aws_connection import get_connection, require_record_connection, AWSConnection, AWSIdentityError
+from services.aws_terraform_guard import validate_aws_configuration
 
 _BACKEND_DIR = Path(__file__).parent.parent
 WORKDIR_BASE = _BACKEND_DIR / "terraform_workdirs"
-EXECUTION_LOG = _BACKEND_DIR / "execution_log.json"
 
 # Shared provider plugin cache — all executions hardlink to the same binaries
 # instead of downloading ~727 MB per workdir. On the same filesystem, Terraform
@@ -20,26 +20,32 @@ EXECUTION_LOG = _BACKEND_DIR / "execution_log.json"
 # 727 MB × number of executions.
 PLUGIN_CACHE_DIR = _BACKEND_DIR / "terraform_plugin_cache"
 
-# File-level lock that serialises all read-modify-write operations on the log.
-# Two concurrent plan requests arriving at the same millisecond would otherwise
-# both read the same state, each append their entry, and the second write would
-# silently overwrite the first — losing the earlier execution record.
-_LOG_LOCK = FileLock(str(EXECUTION_LOG) + ".lock", timeout=10)
 
-
-def _build_env(aws_creds: dict | None) -> dict:
-    """Return an os.environ copy with AWS credentials injected if provided."""
+def _build_env(connection: AWSConnection) -> dict:
+    """Use the exact credentials verified by STS, including temporary tokens."""
     env = os.environ.copy()
-    if aws_creds:
-        if aws_creds.get("aws_access_key_id"):
-            env["AWS_ACCESS_KEY_ID"] = aws_creds["aws_access_key_id"]
-        if aws_creds.get("aws_secret_access_key"):
-            env["AWS_SECRET_ACCESS_KEY"] = aws_creds["aws_secret_access_key"]
-        if aws_creds.get("aws_region"):
-            env["AWS_DEFAULT_REGION"] = aws_creds["aws_region"]
+    for key in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"):
+        env.pop(key, None)
+    env.update(AWS_ACCESS_KEY_ID=connection.access_key, AWS_SECRET_ACCESS_KEY=connection.secret_key,
+               AWS_REGION=connection.region, AWS_DEFAULT_REGION=connection.region,
+               AWS_CONFIG_FILE=os.devnull, AWS_SHARED_CREDENTIALS_FILE=os.devnull,
+               AWS_EC2_METADATA_DISABLED="true", TF_VAR_region=connection.region)
+    if connection.token:
+        env["AWS_SESSION_TOKEN"] = connection.token
     PLUGIN_CACHE_DIR.mkdir(exist_ok=True)
     env["TF_PLUGIN_CACHE_DIR"] = str(PLUGIN_CACHE_DIR)
     return env
+
+
+def _provider_guard(connection):
+    return {"provider": {"aws": [{"region": connection.region, "allowed_account_ids": [connection.account_id]}]}}
+
+
+def _check_provider_guard(workdir, connection):
+    guard = workdir / "aca_identity_override.tf.json"
+    if not guard.exists() or json.loads(guard.read_text()) != _provider_guard(connection):
+        raise AWSIdentityError("The saved Terraform account/region guard is missing or changed. Create a new reviewed plan.")
 
 
 def create_execution_id() -> str:
@@ -51,22 +57,27 @@ def create_execution_id() -> str:
 
 def get_working_dir(execution_id: str) -> Path:
     """Return (and create if needed) the persistent working directory for a given execution."""
+    if not re.fullmatch(r"exec_\d{8}_\d{6}_[a-f0-9]{8}", execution_id):
+        raise ValueError("Invalid execution ID")
     workdir = WORKDIR_BASE / execution_id
     workdir.mkdir(parents=True, exist_ok=True)
     return workdir
 
 
-def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | None = None) -> dict:
+def run_terraform_plan(hcl_config: str, execution_id: str) -> dict:
     """Write HCL to a persistent workdir, then run terraform init and terraform plan. Uses S3 backend if TF_STATE_BUCKET is set, otherwise falls back to local state."""
     try:
+        connection = get_connection()
+        validate_aws_configuration(hcl_config, connection)
         workdir = get_working_dir(execution_id)
-        env = _build_env(aws_creds)
+        env = _build_env(connection)
 
         tf_path = workdir / "main.tf"
         tf_path.write_text(hcl_config, encoding="utf-8")
+        (workdir / "aca_identity_override.tf.json").write_text(json.dumps(_provider_guard(connection)), encoding="utf-8")
 
         # Write S3 backend config if configured; fall back to local state if not.
-        has_s3_backend = _write_s3_backend_config(workdir, execution_id)
+        has_s3_backend = _write_s3_backend_config(workdir, execution_id, connection)
         init_cmd = (
             ["terraform", "init", "-no-color"]
             if has_s3_backend
@@ -154,12 +165,15 @@ def run_terraform_plan(hcl_config: str, execution_id: str, aws_creds: dict | Non
         }
 
 
-def run_terraform_apply(execution_id: str, aws_creds: dict | None = None) -> dict:
+def run_terraform_apply(execution_id: str) -> dict:
     """Apply the previously planned Terraform execution using the saved tfplan file."""
     try:
+        connection = require_record_connection(execution_id)
         workdir = get_working_dir(execution_id)
+        _check_provider_guard(workdir, connection)
+        validate_aws_configuration((workdir / "main.tf").read_text(), connection)
         tfplan = workdir / "tfplan"
-        env = _build_env(aws_creds)
+        env = _build_env(connection)
 
         if not tfplan.exists():
             return {
@@ -218,12 +232,15 @@ def run_terraform_apply(execution_id: str, aws_creds: dict | None = None) -> dic
         }
 
 
-def run_terraform_destroy(execution_id: str, aws_creds: dict | None = None) -> dict:
+def run_terraform_destroy(execution_id: str) -> dict:
     """Destroy resources by re-running terraform init and destroy -auto-approve on the saved main.tf."""
     try:
+        connection = require_record_connection(execution_id)
         workdir = get_working_dir(execution_id)
+        _check_provider_guard(workdir, connection)
+        validate_aws_configuration((workdir / "main.tf").read_text(), connection)
         tf_path = workdir / "main.tf"
-        env = _build_env(aws_creds)
+        env = _build_env(connection)
 
         if not tf_path.exists():
             return {
@@ -290,52 +307,22 @@ def get_key_file(execution_id: str, filename: str) -> bytes:
     return key_path.read_bytes()
 
 
-def _read_log_unlocked() -> list:
-    """Read the log file without acquiring the lock (internal helper)."""
-    if not EXECUTION_LOG.exists():
-        return []
-    try:
-        return json.loads(EXECUTION_LOG.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-
 def log_execution(entry: dict) -> None:
-    """Append a new execution entry to the JSON log file."""
-    with _LOG_LOCK:
-        history = _read_log_unlocked()
-        history.append(entry)
-        EXECUTION_LOG.write_text(
-            json.dumps(history, indent=2, default=str),
-            encoding="utf-8",
-        )
+    """Append an execution to the persistent transactional store."""
+    get_execution_store().append(entry)
 
 
 def log_execution_update(execution_id: str, updates: dict) -> None:
-    """Update an existing log entry in-place by execution_id."""
-    with _LOG_LOCK:
-        history = _read_log_unlocked()
-        for entry in history:
-            if entry.get("execution_id") == execution_id:
-                entry.update(updates)
-                break
-        EXECUTION_LOG.write_text(
-            json.dumps(history, indent=2, default=str),
-            encoding="utf-8",
-        )
+    """Update an existing execution atomically; unknown IDs raise KeyError."""
+    get_execution_store().update(execution_id, updates)
 
 
 def get_execution_history() -> list:
-    """Read and return all execution log entries, or an empty list if the file is missing or corrupt."""
-    if not EXECUTION_LOG.exists():
-        return []
-    try:
-        return json.loads(EXECUTION_LOG.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    """Return persisted history; storage errors propagate instead of hiding data."""
+    return get_execution_store().history()
 
 
-def _write_s3_backend_config(workdir: Path, execution_id: str) -> bool:
+def _write_s3_backend_config(workdir: Path, execution_id: str, connection: AWSConnection) -> bool:
     """Write backend.tf into workdir for S3 state if TF_STATE_BUCKET is set; return True if written, False if absent."""
     bucket = os.getenv("TF_STATE_BUCKET", "").strip()
     if not bucket:
@@ -351,6 +338,7 @@ def _write_s3_backend_config(workdir: Path, execution_id: str) -> bool:
         f'    region       = "{region}"\n'
         '    use_lockfile = true\n'
         '    encrypt      = true\n'
+        f'    allowed_account_ids = ["{connection.account_id}"]\n'
         '  }\n'
         '}\n'
     )

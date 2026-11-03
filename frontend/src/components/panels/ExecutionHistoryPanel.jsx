@@ -14,7 +14,7 @@ export default function ExecutionHistoryPanel() {
     } finally { setLoading(false) }
   }
 
-  useEffect(() => { load() }, []) // eslint-disable-line
+  useEffect(() => { load() }, [])
 
   const statusClass = (s) =>
     s === 'complete'          ? 'success' :
@@ -94,6 +94,9 @@ export default function ExecutionHistoryPanel() {
                           </div>
                           <div className="mono" style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12 }}>
                             {id}
+                          </div>
+                          <div className="mono" style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12 }}>
+                            {x.aws_identity ? `AWS ${x.aws_identity.account_id} · ${x.aws_identity.region}` : 'Legacy execution: account and region are unverified'}
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: x.apply_output ? '1fr 1fr' : '1fr', gap: 12, minWidth: 0 }}>
                             <div style={{ minWidth: 0 }}>

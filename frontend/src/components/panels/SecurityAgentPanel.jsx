@@ -37,7 +37,7 @@ function AgentPhaseSteps({ step, done = false }) {
   )
 }
 
-export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey, awsSecretKey, onApplyComplete }) {
+export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
   const [phase,        setPhase]        = useState('idle')
   const [step,         setStep]         = useState(0)
   const [data,         setData]         = useState(null)
@@ -61,9 +61,7 @@ export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey
     setPhase('thinking'); setStep(0); setData(null); setResult(null); setError(null)
     try {
       const r = await callTool('agent_run', {
-        region, model, api_key: apiKey,
-        aws_access_key_id:     awsAccessKey || '',
-        aws_secret_access_key: awsSecretKey || '',
+        region, model,
       })
       setData(r)
       setPhase(r.status === 'awaiting_approval' ? 'awaiting_approval' : 'idle')
@@ -75,8 +73,6 @@ export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey
     try {
       const r = await callTool('agent_approve', {
         execution_id: data.execution_id, approved: true,
-        aws_access_key_id:     awsAccessKey || '',
-        aws_secret_access_key: awsSecretKey || '',
         aws_region:            region        || 'us-east-1',
       })
       setResult(r)
@@ -120,8 +116,6 @@ export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey
     try {
       await callTool('rollback_execution', {
         execution_id:          data.execution_id,
-        aws_access_key_id:     awsAccessKey || '',
-        aws_secret_access_key: awsSecretKey || '',
         aws_region:            region || 'us-east-1',
       })
       setRollbackDone(true)
@@ -133,7 +127,7 @@ export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey
     setVerifying(true)
     setVerifyResult(null)
     try {
-      const r = await callTool('run_security_analysis_with_summary', { model, api_key: apiKey, region: region || 'us-east-1' })
+      const r = await callTool('run_security_analysis_with_summary', { model, region: region || 'us-east-1' })
       setVerifyResult({ count: r.total_findings })
     } catch { /* silent */ }
     finally { setVerifying(false) }
@@ -142,8 +136,6 @@ export default function SecurityAgentPanel({ region, model, apiKey, awsAccessKey
   const reject = () => {
     callTool('agent_approve', {
       execution_id: data.execution_id, approved: false,
-      aws_access_key_id:     awsAccessKey || '',
-      aws_secret_access_key: awsSecretKey || '',
       aws_region:            region        || 'us-east-1',
     }).catch(() => {})
     setPhase('idle'); setData(null)

@@ -2,29 +2,16 @@ import concurrent.futures
 from collections import defaultdict
 from functools import partial
 
-import boto3
+from services.aws_connection import get_connection
 from botocore.exceptions import ClientError, NoCredentialsError
 
 
-def get_aws_session(credentials: dict) -> boto3.Session:
-    """Build a boto3 Session from explicit credentials. Accepts both 'aws_region' and 'region' key names; prevents env-var or instance-role credentials from bleeding across requests."""
-    return boto3.Session(
-        aws_access_key_id=credentials.get("aws_access_key_id"),
-        aws_secret_access_key=credentials.get("aws_secret_access_key"),
-        region_name=credentials.get(
-            "aws_region", credentials.get("region", "us-east-1")
-        ),
-    )
-
-
-def scan_ec2(region: str = "us-east-1", credentials: dict = None) -> dict:
+def scan_ec2(region: str = "") -> dict:
     """Scan all EC2 instances in the given region and return their metadata."""
 
     try:
         ec2_client = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         paginator = ec2_client.get_paginator("describe_instances")
@@ -97,16 +84,14 @@ def scan_ec2(region: str = "us-east-1", credentials: dict = None) -> dict:
         }
 
 
-def scan_s3(credentials: dict = None) -> dict:
+def scan_s3() -> dict:
     """Scan all S3 buckets and determine public-access status via BPA settings then ACL."""
 
     ALL_USERS_URI = "http://acs.amazonaws.com/groups/global/AllUsers"
 
     try:
         s3_client = (
-            get_aws_session(credentials).client("s3")
-            if credentials
-            else boto3.client("s3")
+            get_connection().client("s3")
         )
 
         response = s3_client.list_buckets()
@@ -262,14 +247,12 @@ def _fetch_user_details(iam_client, user: dict) -> dict:
     }
 
 
-def scan_iam(credentials: dict = None) -> dict:
+def scan_iam() -> dict:
     """Scan all IAM users, fetching MFA status and login history in parallel via ThreadPoolExecutor."""
 
     try:
         iam_client = (
-            get_aws_session(credentials).client("iam")
-            if credentials
-            else boto3.client("iam")
+            get_connection().client("iam")
         )
 
         paginator = iam_client.get_paginator("list_users")
@@ -308,14 +291,12 @@ def scan_iam(credentials: dict = None) -> dict:
         }
 
 
-def scan_security_groups(region: str = "us-east-1", credentials: dict = None) -> dict:
+def scan_security_groups(region: str = "") -> dict:
     """Scan all EC2 security groups and flag any with inbound rules open to 0.0.0.0/0 or ::/0."""
 
     try:
         ec2_client = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         paginator = ec2_client.get_paginator("describe_security_groups")
@@ -335,6 +316,7 @@ def scan_security_groups(region: str = "us-east-1", credentials: dict = None) ->
                         open_to_internet.append(
                             {
                                 "port": port,
+                                "to_port": rule.get("ToPort", port),
                                 "protocol": protocol,
                             }
                         )
@@ -349,6 +331,7 @@ def scan_security_groups(region: str = "us-east-1", credentials: dict = None) ->
                             open_to_internet.append(
                                 {
                                     "port": port,
+                                    "to_port": rule.get("ToPort", port),
                                     "protocol": protocol,
                                 }
                             )
@@ -394,14 +377,12 @@ def scan_security_groups(region: str = "us-east-1", credentials: dict = None) ->
         }
 
 
-def scan_vpc(region: str = "us-east-1", credentials: dict = None) -> dict:
+def scan_vpc(region: str = "") -> dict:
     """Scan all VPCs and count subnets per VPC."""
 
     try:
         ec2_client = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         vpc_paginator = ec2_client.get_paginator("describe_vpcs")
@@ -466,16 +447,14 @@ def scan_vpc(region: str = "us-east-1", credentials: dict = None) -> dict:
         }
 
 
-def scan_existing_infra_for_context(region: str = "us-east-1", credentials: dict = None) -> str:
+def scan_existing_infra_for_context(region: str = "") -> str:
     """Scan existing AWS resources and return a human-readable string of resource IDs for LLM context. Silently skips any service that fails."""
     lines = [f"EXISTING AWS INFRASTRUCTURE (region: {region}):"]
     lines.append("Reference these IDs directly in HCL — do NOT create duplicates.\n")
 
     try:
         ec2 = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         try:
@@ -539,9 +518,7 @@ def scan_existing_infra_for_context(region: str = "us-east-1", credentials: dict
 
     try:
         iam = (
-            get_aws_session(credentials).client("iam")
-            if credentials
-            else boto3.client("iam")
+            get_connection().client("iam")
         )
         role_paginator = iam.get_paginator("list_roles")
         roles = [r for page in role_paginator.paginate() for r in page["Roles"]]
@@ -557,9 +534,7 @@ def scan_existing_infra_for_context(region: str = "us-east-1", credentials: dict
 
     try:
         s3 = (
-            get_aws_session(credentials).client("s3")
-            if credentials
-            else boto3.client("s3")
+            get_connection().client("s3")
         )
         buckets = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
         if buckets:
@@ -576,13 +551,11 @@ def scan_existing_infra_for_context(region: str = "us-east-1", credentials: dict
     return "\n".join(lines)
 
 
-def scan_sg_usage(region: str = "us-east-1", credentials: dict = None) -> dict:
+def scan_sg_usage(region: str = "") -> dict:
     """Build a complete map of security group → attached resources using ENIs, which covers all AWS resource types."""
     try:
         ec2 = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         # Seed the map with every SG so unused ones appear as empty lists
@@ -647,15 +620,12 @@ def scan_sg_usage(region: str = "us-east-1", credentials: dict = None) -> dict:
 def revoke_sg_ingress_rule(
     sg_id: str,
     port: int,
-    region: str = "us-east-1",
-    credentials: dict = None,
+    region: str = "",
 ) -> dict:
     """Revoke all 0.0.0.0/0 and ::/0 ingress rules for a port on a security group. Calls the AWS SDK directly since Terraform cannot remove individual rules from unmanaged groups."""
     try:
         ec2 = (
-            get_aws_session(credentials).client("ec2", region_name=region)
-            if credentials
-            else boto3.client("ec2", region_name=region)
+            get_connection(region).client("ec2", region_name=region)
         )
 
         response = ec2.describe_security_groups(GroupIds=[sg_id])

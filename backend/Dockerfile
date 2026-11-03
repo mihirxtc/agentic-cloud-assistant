@@ -28,7 +28,8 @@ COPY . .
 
 # chroma_db and terraform_workdirs are Docker named volumes (data persists across restarts)
 # terraform_plugin_cache stays in the image so baked providers are available without downloads
-RUN mkdir -p /app/chroma_db /app/terraform_workdirs /app/terraform_plugin_cache
+RUN mkdir -p /app/data /app/chroma_db /app/terraform_workdirs /app/terraform_plugin_cache
+ENV ACA_DATA_DIR=/app/data CHROMA_DB_PATH=/app/chroma_db
 
 # Pre-download Terraform providers at build time into the plugin cache
 # Cuts terraform init from ~60s to ~2s at runtime via hardlinks

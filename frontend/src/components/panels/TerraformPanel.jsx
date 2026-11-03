@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { callTool } from '../../api/mcpClient'
+import { authFetch } from '../../api/session'
 import { QUICK_REQUESTS } from '../../utils/constants'
 
 const PHASE_BADGE = {
@@ -11,7 +12,7 @@ const PHASE_BADGE = {
   rejected:          ['muted',   'REJECTED'],
 }
 
-function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegion, model, apiKey, onApplyComplete, onDone }) {
+function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, onDone }) {
   const [phase,        setPhase]        = useState('planning')
   const [planOutput,   setPlanOutput]   = useState('')
   const [applyOutput,  setApplyOutput]  = useState('')
@@ -24,8 +25,6 @@ function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegi
   const [rollbackDone, setRollbackDone] = useState(false)
 
   const awsArgs = {
-    aws_access_key_id:     awsAccessKey || '',
-    aws_secret_access_key: awsSecretKey || '',
     aws_region:            awsRegion    || 'us-east-1',
   }
 
@@ -73,7 +72,7 @@ function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegi
 
   const downloadPem = async (file) => {
     try {
-      const res = await fetch(file.download_path)
+      const res = await authFetch(file.download_path)
       if (!res.ok) throw new Error(`Server returned ${res.status}`)
       const text = await res.text()
       const blob = new Blob([text], { type: 'application/x-pem-file' })
@@ -112,8 +111,6 @@ function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegi
     try {
       await callTool('rollback_execution', {
         execution_id:          executionId,
-        aws_access_key_id:     awsAccessKey || '',
-        aws_secret_access_key: awsSecretKey || '',
         aws_region:            awsRegion    || 'us-east-1',
       })
       setRollbackDone(true)
@@ -125,7 +122,7 @@ function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegi
     setVerifying(true)
     setVerifyResult(null)
     try {
-      const r = await callTool('run_security_analysis_with_summary', { model: model || 'groq', api_key: apiKey || '', region: awsRegion || 'us-east-1' })
+      const r = await callTool('run_security_analysis_with_summary', { model: model || 'groq', region: awsRegion || 'us-east-1' })
       setVerifyResult({ count: r.total_findings })
     } catch { /* silent */ }
     finally { setVerifying(false) }
@@ -252,7 +249,7 @@ function ExecutionInline({ hcl, description, awsAccessKey, awsSecretKey, awsRegi
   )
 }
 
-export default function TerraformPanel({ model, apiKey, awsAccessKey, awsSecretKey, awsRegion, prefill, onPrefillConsumed, onApplyComplete, }) {
+export default function TerraformPanel({ model, awsRegion, prefill, onPrefillConsumed, onApplyComplete, }) {
   const [input,    setInput]    = useState('')
   const [loading,  setLoading]  = useState(false)
   const [result,   setResult]   = useState(null)
@@ -279,9 +276,6 @@ export default function TerraformPanel({ model, apiKey, awsAccessKey, awsSecretK
       const r = await callTool('generate_terraform_from_request', {
         request,
         model,
-        api_key: apiKey,
-        aws_access_key_id:     awsAccessKey || '',
-        aws_secret_access_key: awsSecretKey || '',
         aws_region:            awsRegion    || 'us-east-1',
       })
       setResult(r)
@@ -402,9 +396,8 @@ export default function TerraformPanel({ model, apiKey, awsAccessKey, awsSecretK
 
             {showExec && (
               <ExecutionInline
-                hcl={result.hcl} description={input}
-                awsAccessKey={awsAccessKey} awsSecretKey={awsSecretKey} awsRegion={awsRegion}
-                model={model} apiKey={apiKey}
+                hcl={result.hcl} description={input} awsRegion={awsRegion}
+                model={model}
                 onApplyComplete={onApplyComplete}
                 onDone={() => { setShowExec(false); setResult(null); setInput('') }}
               />

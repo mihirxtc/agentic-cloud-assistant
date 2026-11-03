@@ -1,3 +1,13 @@
+def port_exposed(entry: dict, port: int) -> bool:
+    if str(entry.get("protocol")) == "-1":
+        return True
+    if str(entry.get("protocol", "tcp")) not in ("tcp", "6"):
+        return False
+    start = entry.get("port")
+    end = entry.get("to_port", start)
+    return isinstance(start, int) and isinstance(end, int) and start <= port <= end
+
+
 from datetime import datetime, timezone
 
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
@@ -43,7 +53,7 @@ def check_ssh_port_open(security_groups_data: dict) -> list:
             sg_name = sg.get("name", "unknown")
 
             for entry in sg.get("open_to_internet", []):
-                if entry.get("port") == 22:
+                if port_exposed(entry, 22):
                     finding_id = f"SSH_PORT_OPEN-{sg_id}-{i}"
 
                     findings.append(
@@ -89,7 +99,7 @@ def check_rdp_port_open(security_groups_data: dict) -> list:
             sg_name = sg.get("name", "unknown")
 
             for entry in sg.get("open_to_internet", []):
-                if entry.get("port") == 3389:
+                if port_exposed(entry, 3389):
                     finding_id = f"RDP_PORT_OPEN-{sg_id}-{i}"
 
                     findings.append(

@@ -1,6 +1,6 @@
 import Logo from './Logo'
 
-export default function Topbar({ securityScore, onOpenSettings, onLogout, region, hasKeys }) {
+export default function Topbar({ securityScore, onOpenSettings, onLogout, region, hasKeys, awsIdentity }) {
   const scoreClass =
     securityScore == null ? null :
     securityScore >= 80   ? 'success' :
@@ -29,9 +29,9 @@ export default function Topbar({ securityScore, onOpenSettings, onLogout, region
             SEC {securityScore}
           </span>
         )}
-        <button className="aca-btn-ghost small" onClick={onOpenSettings}>{region}</button>
+        <button className="aca-btn-ghost small" onClick={onOpenSettings}>{awsIdentity?.account_id ?? 'AWS unverified'} · {region}</button>
         <button className="aca-btn-ghost small" onClick={onOpenSettings}>
-          <span className={'aca-dot-indicator ' + (hasKeys ? 'green' : 'red')} /> API KEYS
+          <span className={'aca-dot-indicator ' + (hasKeys ? 'green' : 'red')} /> MODEL CONFIG
         </button>
         <button className="aca-btn-ghost small danger" onClick={onLogout}>LOGOUT</button>
       </div>

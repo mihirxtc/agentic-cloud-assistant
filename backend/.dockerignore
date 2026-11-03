@@ -9,6 +9,7 @@ venv
 
 # Runtime data — mounted as Docker volumes, not baked into the image
 chroma_db
+data
 terraform_workdirs
 execution_log.json
 benchmark_results.json

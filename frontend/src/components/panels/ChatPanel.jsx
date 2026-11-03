@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { callTool } from '../../api/mcpClient'
 
-export default function ChatPanel({ model, apiKey }) {
+export default function ChatPanel({ model }) {
   const [messages, setMessages] = useState([])
   const [input,    setInput]    = useState('')
   const [loading,  setLoading]  = useState(false)
@@ -20,7 +20,7 @@ export default function ChatPanel({ model, apiKey }) {
     setLoading(true)
     try {
       const history = [...messages, newMsg].map((m) => ({ role: m.role, content: m.content }))
-      const r = await callTool('aws_chat', { message: msg, model, api_key: apiKey, history })
+      const r = await callTool('aws_chat', { message: msg, model, history })
       setMessages((m) => [...m, { role: 'assistant', content: r.reply }])
     } catch (e) {
       setMessages((m) => [...m, { role: 'assistant', content: `Error: ${e.message || 'Failed to get a response.'}` }])

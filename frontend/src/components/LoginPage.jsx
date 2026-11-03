@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth } from '../contexts/useAuth'
 import Logo from './ui/Logo'
 
 export default function LoginPage() {
@@ -8,9 +8,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [err,      setErr]      = useState(null)
 
-  const submit = (e) => {
+  const [busy, setBusy] = useState(false)
+
+  const submit = async (e) => {
     e.preventDefault()
-    if (!login(username, password)) setErr('Invalid credentials')
+    if (busy) return
+    setBusy(true)
+    setErr(null)
+    try { await login(username, password) }
+    catch (error) { setErr(error.message) }
+    finally { setPassword(''); setBusy(false) }
   }
 
   return (
@@ -45,7 +52,7 @@ export default function LoginPage() {
               letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 5,
             }}>Username</label>
             <input
-              className="aca-input" autoFocus
+              className="aca-input" autoFocus autoComplete="username" required disabled={busy}
               value={username} onChange={(e) => setUsername(e.target.value)}
             />
           </div>
@@ -55,18 +62,16 @@ export default function LoginPage() {
               letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 5,
             }}>Password</label>
             <input
-              className="aca-input" type="password"
+              className="aca-input" type="password" autoComplete="current-password" required disabled={busy}
               value={password} onChange={(e) => setPassword(e.target.value)}
             />
           </div>
         </div>
 
-        <button type="submit" className="aca-btn-primary" style={{ padding: '10px 14px', fontSize: 13 }}>
-          Sign in
+        <button type="submit" disabled={busy} className="aca-btn-primary" style={{ padding: '10px 14px', fontSize: 13 }}>
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
-        <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
-          demo: admin / mscProject@DMU
-        </div>
+
       </form>
     </div>
   )

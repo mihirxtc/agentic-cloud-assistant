@@ -1,45 +1,48 @@
-import { createContext, useContext, useState, useEffect } from 'react'
-
-export const DEFAULT_KEYS = {
-  model:          'groq',
-  region:         'us-east-1',
-  groq_key:       '',
-  anthropic_key:  '',
-  ollama_url:     '',
-  aws_access_key: '',
-  aws_secret_key: '',
-}
-
-const ApiKeyContext = createContext(null)
+import { useState, useEffect, useSyncExternalStore } from 'react'
+import { ApiKeyContext } from './useApiKeys'
+import { useAuth } from './useAuth'
+import { authFetch } from '../api/session'
+import { getAwsState, subscribeAwsState, refreshAwsIdentity, clearAwsIdentity } from '../api/awsIdentity'
+import { DEFAULT_PREFERENCES, browserStorage, readPreferences, savePreferences } from '../utils/preferences'
 
 export function ApiKeyProvider({ children }) {
-  const [keys, setKeys] = useState(() => {
-    try {
-      const stored = localStorage.getItem('agentic_cloud_api_keys')
-      return stored ? { ...DEFAULT_KEYS, ...JSON.parse(stored) } : DEFAULT_KEYS
-    } catch { return DEFAULT_KEYS }
-  })
+  const { isAuthenticated } = useAuth()
+  const [keys, setKeys] = useState(() => readPreferences(browserStorage()))
+  const [serverConfig, setServerConfig] = useState(null)
+  const [configError, setConfigError] = useState(null)
+  const awsState = useSyncExternalStore(subscribeAwsState, getAwsState)
 
   useEffect(() => {
-    try { localStorage.setItem('agentic_cloud_api_keys', JSON.stringify(keys)) } catch {}
+    if (isAuthenticated) refreshAwsIdentity(keys.region)
+    else clearAwsIdentity()
+    return () => clearAwsIdentity()
+  }, [isAuthenticated, keys.region])
+
+  useEffect(() => {
+    savePreferences(browserStorage(), keys)
   }, [keys])
 
-  function setAllKeys(newKeys) {
-    setKeys({ ...DEFAULT_KEYS, ...newKeys })
-  }
+  useEffect(() => {
+    if (!isAuthenticated) return
+    let active = true
+    authFetch('/auth/config').then(async (response) => {
+      if (!response.ok) throw new Error('Unable to load server configuration status')
+      const config = await response.json()
+      if (active) { setServerConfig(config); setConfigError(null) }
+    }).catch((err) => { if (active) setConfigError(err.message) })
+    return () => { active = false }
+  }, [isAuthenticated])
 
-  function clearAllKeys() {
-    setKeys(DEFAULT_KEYS)
-    try { localStorage.removeItem('agentic_cloud_api_keys') } catch {}
-  }
+  function setAllKeys(preferences) { setKeys(savePreferences(browserStorage(), preferences)) }
+  function clearAllKeys() { setKeys({ ...DEFAULT_PREFERENCES }) }
 
   return (
-    <ApiKeyContext.Provider value={{ keys, setAllKeys, clearAllKeys }}>
+    <ApiKeyContext.Provider value={{ keys, setAllKeys, clearAllKeys,
+      serverConfig: isAuthenticated ? serverConfig : null, configError,
+      awsIdentity: isAuthenticated && awsState.region === keys.region ? awsState.identity : null,
+      awsIdentityError: awsState.region === keys.region ? awsState.error : null,
+      awsIdentityLoading: awsState.loading, refreshAwsIdentity: () => refreshAwsIdentity(keys.region) }}>
       {children}
     </ApiKeyContext.Provider>
   )
-}
-
-export function useApiKeys() {
-  return useContext(ApiKeyContext)
 }

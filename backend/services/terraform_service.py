@@ -9,6 +9,9 @@ import anthropic
 import httpx
 from groq import Groq
 
+from services.aws_terraform_guard import validate_aws_configuration
+from services.aws_connection import AWSIdentityError
+
 # Shared plugin cache for the validate subprocess — same directory as used by
 # execution_service, so providers downloaded during plan/apply are reused here.
 _PLUGIN_CACHE_DIR = Path(__file__).parent.parent / "terraform_plugin_cache"
@@ -243,6 +246,11 @@ subnet_id entirely and let AWS place the instance in the default subnet.\
 
 def validate_terraform_syntax(hcl: str) -> dict:
     """Run terraform init and terraform validate in a temp directory; return {"valid": bool, "message": str}."""
+    try:
+        validate_aws_configuration(hcl)
+    except AWSIdentityError as error:
+        return {"valid": False, "message": str(error)}
+
     # Pass the shared plugin cache so providers are reused across validate calls
     # instead of being re-downloaded from scratch on every invocation.
     _PLUGIN_CACHE_DIR.mkdir(exist_ok=True)

@@ -1,14 +1,16 @@
+import { useTweaks } from './components/tweaks/useTweaks'
 import { useState, useEffect } from 'react'
 import { Toaster } from 'react-hot-toast'
-import { AuthProvider, useAuth }     from './contexts/AuthContext'
-import { ApiKeyProvider, useApiKeys } from './contexts/ApiKeyContext'
+import { AuthProvider } from './contexts/AuthContext'
+import { useAuth } from './contexts/useAuth'
+import { ApiKeyProvider } from './contexts/ApiKeyContext'
+import { useApiKeys } from './contexts/useApiKeys'
 import { TWEAK_DEFAULTS }            from './utils/constants'
 import ErrorBoundary  from './components/ui/ErrorBoundary'
 import LoginPage      from './components/LoginPage'
 import SettingsModal  from './components/SettingsModal'
 import Dashboard      from './components/Dashboard'
 import TweaksPanel, {
-  useTweaks,
   TweakSection,
   TweakColor,
   TweakSlider,
@@ -18,7 +20,8 @@ import TweaksPanel, {
 } from './components/tweaks/TweaksPanel'
 
 function AppInner() {
-  const { isAuthenticated }             = useAuth()
+  const { isAuthenticated, checkingSession, sessionError, retrySession }             = useAuth()
+  const { keys, awsIdentity } = useApiKeys()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [t, setTweak]                   = useTweaks(TWEAK_DEFAULTS)
 
@@ -44,12 +47,18 @@ function AppInner() {
     `
   }, [t])
 
+  if (sessionError || checkingSession) return (
+    <div role="status" style={{ padding: 32, color: 'var(--text-primary)' }}>
+      <p>{sessionError || 'Checking your session…'}</p>
+      {sessionError && <button className="aca-btn-primary" onClick={retrySession}>Try again</button>}
+    </div>
+  )
   if (!isAuthenticated) return <LoginPage />
 
   return (
     <>
       <Toaster position="top-right" />
-      <Dashboard onOpenSettings={() => setSettingsOpen(true)} />
+      <Dashboard key={`${keys.region}:${awsIdentity?.partition}:${awsIdentity?.account_id}:${awsIdentity?.arn}`} onOpenSettings={() => setSettingsOpen(true)} />
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       <TweaksPanel title="Tweaks">
         <TweakSection label="Theme" />

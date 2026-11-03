@@ -1,4 +1,7 @@
-const MCP_ENDPOINT = import.meta.env.VITE_MCP_URL ?? 'http://localhost:8000/mcp/'
+import { authFetch } from './session'
+import { withAwsIdentity } from './awsIdentity'
+
+const MCP_ENDPOINT = (import.meta.env.VITE_MCP_URL ?? '/mcp/').replace(/\/?$/, '/')
 
 class MCPClient {
   constructor(endpoint) {
@@ -42,7 +45,7 @@ class MCPClient {
       'Accept':       'application/json, text/event-stream',
     }
     if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId
-    const res = await fetch(this.endpoint, {
+    const res = await authFetch(this.endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({ jsonrpc: '2.0', ...message }),
@@ -58,7 +61,7 @@ class MCPClient {
     }
     if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId
 
-    const res = await fetch(this.endpoint, {
+    const res = await authFetch(this.endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({ jsonrpc: '2.0', id, ...message }),
@@ -130,5 +133,5 @@ class MCPClient {
 const mcpClient = new MCPClient(MCP_ENDPOINT)
 
 export function callTool(name, args = {}) {
-  return mcpClient.callTool(name, args)
+  return mcpClient.callTool(name, withAwsIdentity(name, args))
 }

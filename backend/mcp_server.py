@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -12,10 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from cachetools import TTLCache
 from fastmcp import FastMCP
-from fastmcp.server.http import create_streamable_http_app
-from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 import httpx
@@ -43,7 +41,6 @@ from services.execution_service import (
     get_execution_history,
     log_execution,
     log_execution_update,
-    purge_old_workdirs,
     run_terraform_apply,
     run_terraform_destroy,
     run_terraform_plan,
@@ -65,8 +62,26 @@ from services.terraform_service import (
 
 mcp = FastMCP("agentic-cloud-assistant")
 
-# Keyed by region, refreshed every 5 minutes. Avoids re-scanning on every chat message.
-_SCAN_CACHE: TTLCache = TTLCache(maxsize=10, ttl=300)
+from services.aws_connection import aws_operation, get_connection, require_record_connection, require_scan_connection
+from services.aws_cache import cached_context
+from services.storage import get_execution_store
+
+_SCAN_SERVICES = ("ec2", "s3", "iam", "security_groups", "vpc")
+
+
+def _collect_scan(region=""):
+    connection = get_connection(region)
+    services = {
+        "ec2": scan_ec2(region=connection.region), "s3": scan_s3(), "iam": scan_iam(),
+        "security_groups": scan_security_groups(region=connection.region), "vpc": scan_vpc(region=connection.region),
+    }
+    scan_id = get_execution_store().record_scan(connection.identity, services)
+    return {**services, "scan_id": scan_id, "aws_identity": connection.identity}
+
+
+def _scan_errors(scan_data):
+    return {name: scan_data.get(name, {}).get("error", "Scan incomplete")
+            for name in _SCAN_SERVICES if scan_data.get(name, {}).get("status") != "ok"}
 
 
 def _resolve_key(model: str, override: str) -> str:
@@ -91,67 +106,77 @@ def health_check() -> dict:
 
 
 @mcp.tool()
-def full_aws_scan(region: str = "us-east-1") -> dict:
+@aws_operation('region')
+def full_aws_scan(region: str = "", expected_account_id: str = "") -> dict:
     """Run all five AWS service scans and return combined infrastructure data."""
-    return {
-        "ec2": scan_ec2(region=region),
-        "s3": scan_s3(),
-        "iam": scan_iam(),
-        "security_groups": scan_security_groups(region=region),
-        "vpc": scan_vpc(region=region),
-    }
+    return _collect_scan(region)
 
 
 @mcp.tool()
-def scan_ec2_instances(region: str = "us-east-1") -> dict:
+@aws_operation('region')
+def aws_connection_identity(region: str = "") -> dict:
+    """Verify the current server AWS account and selected region through STS."""
+    return {"aws_identity": get_connection().identity}
+
+
+@mcp.tool()
+@aws_operation('region')
+def scan_ec2_instances(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all EC2 instances in the specified AWS region."""
     return scan_ec2(region=region)
 
 
 @mcp.tool()
-def scan_s3_buckets() -> dict:
+@aws_operation('region')
+def scan_s3_buckets(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all S3 buckets and check public-access status."""
     return scan_s3()
 
 
 @mcp.tool()
-def scan_iam_users() -> dict:
+@aws_operation('region')
+def scan_iam_users(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all IAM users and check MFA status and last-login date."""
     return scan_iam()
 
 
 @mcp.tool()
-def scan_security_groups_detail(region: str = "us-east-1") -> dict:
+@aws_operation('region')
+def scan_security_groups_detail(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all EC2 security groups and flag dangerous internet-facing rules."""
     return scan_security_groups(region=region)
 
 
 @mcp.tool()
-def scan_vpc_detail(region: str = "us-east-1") -> dict:
+@aws_operation('region')
+def scan_vpc_detail(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all VPCs including subnet counts."""
     return scan_vpc(region=region)
 
 
 @mcp.tool()
+@aws_operation('region')
 def scan_sg_usage_tool(
-    region: str = "us-east-1",
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
+    region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Map every security group to the resources currently attached to it."""
-    credentials = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            region,
-    } if aws_access_key_id else None
 
-    return scan_sg_usage(region=region, credentials=credentials)
+    return scan_sg_usage(region=region)
 
 
 @mcp.tool()
 def analyse_security_findings(scan_data: dict) -> dict:
     """Run 7 built-in security rules against raw AWS scan data."""
+    scan_errors = _scan_errors(scan_data)
+    if scan_errors:
+        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
+
     findings = run_security_analysis(scan_data)
+    for finding in findings:
+        if scan_data.get("scan_id"):
+            finding["scan_id"] = scan_data["scan_id"]
+            finding["aws_identity"] = scan_data["aws_identity"]
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in findings:
         sev = f.get("severity", "LOW")
@@ -160,22 +185,26 @@ def analyse_security_findings(scan_data: dict) -> dict:
 
 
 @mcp.tool()
+@aws_operation('region')
 async def run_security_analysis_with_summary(
-    region: str = "us-east-1",
+    region: str = "",
     model: str = "groq",
     api_key: str = "",
     ollama_model_name: str = DEFAULT_MODEL,
+    expected_account_id: str = "",
 ) -> dict:
     """Scan AWS, run security rules, and generate an LLM plain-English summary."""
-    scan_data = {
-        "ec2": scan_ec2(region=region),
-        "s3": scan_s3(),
-        "iam": scan_iam(),
-        "security_groups": scan_security_groups(region=region),
-        "vpc": scan_vpc(region=region),
-    }
+    scan_data = _collect_scan(region)
+
+    scan_errors = _scan_errors(scan_data)
+    if scan_errors:
+        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
 
     findings = run_security_analysis(scan_data)
+    for finding in findings:
+        if scan_data.get("scan_id"):
+            finding["scan_id"] = scan_data["scan_id"]
+            finding["aws_identity"] = scan_data["aws_identity"]
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in findings:
         sev = f.get("severity", "LOW")
@@ -211,7 +240,8 @@ async def run_security_analysis_with_summary(
 
 
 @mcp.tool()
-def estimate_costs(region: str = "us-east-1", time_period_days: int = 30) -> dict:
+@aws_operation('region')
+def estimate_costs(region: str = "", time_period_days: int = 30, expected_account_id: str = "") -> dict:
     """Retrieve AWS spend data and detect cost anomalies via Cost Explorer."""
     months = max(1, time_period_days // 30)
     monthly_trend = get_monthly_trend(months=months)
@@ -225,11 +255,13 @@ def estimate_costs(region: str = "us-east-1", time_period_days: int = 30) -> dic
 
 
 @mcp.tool()
+@aws_operation('region')
 async def get_cost_with_summary(
-    region: str = "us-east-1",
+    region: str = "",
     model: str = "groq",
     api_key: str = "",
     ollama_model_name: str = DEFAULT_MODEL,
+    expected_account_id: str = "",
 ) -> dict:
     """Retrieve AWS cost data and generate an LLM cost-optimisation summary."""
     monthly_trend = get_monthly_trend(months=3)
@@ -261,7 +293,8 @@ async def get_cost_with_summary(
 
 
 @mcp.tool()
-async def generate_terraform_hcl(resource_type: str, config: dict) -> dict:
+@aws_operation('region')
+async def generate_terraform_hcl(resource_type: str, config: dict, region: str = "", expected_account_id: str = "") -> dict:
     """Generate Terraform HCL from a resource type and config dict."""
     model = "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "groq"
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("GROQ_API_KEY", "")
@@ -270,7 +303,7 @@ async def generate_terraform_hcl(resource_type: str, config: dict) -> dict:
         if config
         else ""
     )
-    request = f"Create a {resource_type}{config_detail}"
+    request = f"Create a {resource_type}{config_detail}. Target AWS account {get_connection().account_id}, region {get_connection().region}."
     result = await generate_terraform(request, model, api_key)
     return {
         "hcl": result.get("hcl", ""),
@@ -283,13 +316,13 @@ async def generate_terraform_hcl(resource_type: str, config: dict) -> dict:
 
 
 @mcp.tool()
+@aws_operation('aws_region')
 async def generate_terraform_from_request(
     request: str,
     model: str = "groq",
     api_key: str = "",
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Generate Terraform HCL from a plain-English request string."""
     resolved_model = model or ("anthropic" if os.getenv("ANTHROPIC_API_KEY") else "groq")
@@ -297,18 +330,11 @@ async def generate_terraform_from_request(
 
     # Scan existing infra so the LLM knows what already exists
     existing_infra = ""
-    if aws_access_key_id:
-        creds = {
-            "aws_access_key_id":     aws_access_key_id,
-            "aws_secret_access_key": aws_secret_access_key,
-            "aws_region":            aws_region,
-        }
-        try:
-            existing_infra = await asyncio.to_thread(
-                scan_existing_infra_for_context, aws_region, creds
-            )
-        except Exception:
-            existing_infra = ""
+    try:
+        existing_infra = await asyncio.to_thread(scan_existing_infra_for_context, get_connection().region)
+    except Exception:
+        existing_infra = ""
+    existing_infra = f"TARGET AWS ACCOUNT: {get_connection().account_id}; REGION: {get_connection().region}. Use this region.\n" + existing_infra
 
     # Augment with knowledge base context if available
     if _RAG_AVAILABLE:
@@ -369,26 +395,21 @@ def validate_terraform_plan(hcl: str) -> dict:
 
 
 @mcp.tool()
+@aws_operation('aws_region')
 async def run_terraform_plan_mcp(
     hcl_config: str,
     description: str = "",
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Write HCL to a persistent working directory, run terraform init + plan."""
     execution_id = create_execution_id()
-    aws_creds = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            aws_region,
-    } if aws_access_key_id else None
-    plan_result = await asyncio.to_thread(run_terraform_plan, hcl_config, execution_id, aws_creds)
+    plan_result = await asyncio.to_thread(run_terraform_plan, hcl_config, execution_id)
 
     status = "awaiting_approval" if plan_result["success"] else "plan_failed"
     log_execution(
         {
-            "execution_id": execution_id,
+            "execution_id": execution_id, "aws_identity": get_connection().identity,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": status,
             "description": description or "Terraform plan",
@@ -400,7 +421,7 @@ async def run_terraform_plan_mcp(
     )
 
     return {
-        "execution_id": execution_id,
+        "execution_id": execution_id, "aws_identity": get_connection().identity,
         "status": status,
         "plan_output": plan_result.get("plan_output", ""),
         "resources_to_add": plan_result.get("resources_to_add", 0),
@@ -410,12 +431,12 @@ async def run_terraform_plan_mcp(
 
 
 @mcp.tool()
+@aws_operation('aws_region', execution=True, mutating=True)
 def run_terraform_apply_mcp(
     execution_id: str,
     approved: bool,
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Apply or reject a previously planned Terraform execution."""
     if not approved:
@@ -423,12 +444,7 @@ def run_terraform_apply_mcp(
         cleanup_workdir_plugins(execution_id)
         return {"status": "rejected", "apply_output": "", "resources_applied": []}
 
-    aws_creds = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            aws_region,
-    } if aws_access_key_id else None
-    apply_result = run_terraform_apply(execution_id, aws_creds)
+    apply_result = run_terraform_apply(execution_id)
     status = "complete" if apply_result.get("success") else "failed"
     log_execution_update(
         execution_id,
@@ -466,35 +482,26 @@ def summarise_plan_for_human(
 
 
 @mcp.tool()
+@aws_operation('region')
 async def aws_chat(
     message: str,
     model: str = "groq",
     api_key: str = "",
     history: list = None,
-    region: str = "us-east-1",
+    region: str = "",
     ollama_model_name: str = DEFAULT_MODEL,
+    expected_account_id: str = "",
 ) -> dict:
     """Chat with an LLM about your live AWS infrastructure."""
     history = history or []
     resolved_key = _resolve_key(model, api_key)
 
-    # Include the first 12 chars of the access key in the cache key so two users
-    # with different AWS accounts in the same region get independent cache entries.
-    _env_key_id = os.getenv("AWS_ACCESS_KEY_ID", "env-default")
-    _cache_key  = (region, _env_key_id[:12])
-    if _cache_key not in _SCAN_CACHE:
-        _SCAN_CACHE[_cache_key] = {
-            "ec2": scan_ec2(region=region),
-            "s3": scan_s3(),
-            "iam": scan_iam(),
-            "security_groups": scan_security_groups(region=region),
-            "vpc": scan_vpc(region=region),
-            "cost_current_month": get_current_month_cost(),
-            "cost_monthly_trend": get_monthly_trend(months=3),
-            "cost_by_service": get_cost_by_service(),
-            "sg_usage": scan_sg_usage(region=region),
-        }
-    scan_data = _SCAN_CACHE[_cache_key]
+    connection = get_connection()
+    def build_context():
+        return {**_collect_scan(connection.region),
+                "cost_current_month": get_current_month_cost(), "cost_monthly_trend": get_monthly_trend(months=3),
+                "cost_by_service": get_cost_by_service(), "sg_usage": scan_sg_usage(region=connection.region)}
+    scan_data = cached_context(connection, build_context)
 
     augmented_message = message
     if _RAG_AVAILABLE:
@@ -527,30 +534,27 @@ async def aws_chat(
 
 
 @mcp.tool()
+@aws_operation('region')
 async def agent_run(
-    region: str = "us-east-1",
+    region: str = "",
     model: str = "groq",
     api_key: str = "",
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
     ollama_model_name: str = DEFAULT_MODEL,
+    expected_account_id: str = "",
 ) -> dict:
     """Autonomous security remediation agent — scan, pick top issue, generate fix, plan."""
-    aws_creds = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            region,
-    } if aws_access_key_id else None
 
-    scan_data = {
-        "ec2": scan_ec2(region=region, credentials=aws_creds),
-        "s3": scan_s3(credentials=aws_creds),
-        "iam": scan_iam(credentials=aws_creds),
-        "security_groups": scan_security_groups(region=region, credentials=aws_creds),
-        "vpc": scan_vpc(region=region, credentials=aws_creds),
-    }
+    scan_data = _collect_scan(region)
+
+    scan_errors = _scan_errors(scan_data)
+    if scan_errors:
+        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
 
     findings = run_security_analysis(scan_data)
+    for finding in findings:
+        if scan_data.get("scan_id"):
+            finding["scan_id"] = scan_data["scan_id"]
+            finding["aws_identity"] = scan_data["aws_identity"]
     if not findings:
         return {"status": "no_issues", "message": "No security issues found."}
 
@@ -598,7 +602,7 @@ async def agent_run(
         summary = await prompt_llm(summary_prompt, resolved_model, resolved_key, model_name=ollama_model_name)
 
         log_execution({
-            "execution_id": execution_id,
+            "execution_id": execution_id, "aws_identity": get_connection().identity,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "awaiting_approval",
             "description": fix_request,
@@ -615,7 +619,7 @@ async def agent_run(
 
         return {
             "status": "awaiting_approval",
-            "execution_id": execution_id,
+            "execution_id": execution_id, "aws_identity": get_connection().identity,
             "issue": issue,
             "hcl": hcl,
             "plan_output": plan_output,
@@ -627,13 +631,11 @@ async def agent_run(
 
     # All other issue types use the Terraform generate → plan → apply flow.
     existing_infra = ""
-    if aws_creds:
-        try:
-            existing_infra = await asyncio.to_thread(
-                scan_existing_infra_for_context, region, aws_creds
-            )
-        except Exception:
-            existing_infra = ""
+    try:
+        existing_infra = await asyncio.to_thread(scan_existing_infra_for_context, get_connection().region)
+    except Exception:
+        existing_infra = ""
+    existing_infra = f"TARGET AWS ACCOUNT: {get_connection().account_id}; REGION: {get_connection().region}.\n" + existing_infra
 
     terraform_result = await generate_terraform(fix_request, resolved_model, resolved_key, existing_infra)
     if terraform_result.get("error"):
@@ -641,7 +643,11 @@ async def agent_run(
 
     hcl = terraform_result.get("hcl", "")
 
-    plan_result = await asyncio.to_thread(run_terraform_plan, hcl, execution_id, aws_creds)
+    plan_result = await asyncio.to_thread(run_terraform_plan, hcl, execution_id)
+
+    if not plan_result.get("success"):
+        log_execution({"execution_id": execution_id, "aws_identity": get_connection().identity, "status": "plan_failed", "plan_output": plan_result.get("plan_output", "")})
+        return {"execution_id": execution_id, "aws_identity": get_connection().identity, "status": "plan_failed", "error": plan_result.get("plan_output", "Planning failed")}
 
     plan_snippet = plan_result.get("plan_output", "")[:2000]
     summary_prompt = (
@@ -658,7 +664,7 @@ async def agent_run(
 
     log_execution(
         {
-            "execution_id": execution_id,
+            "execution_id": execution_id, "aws_identity": get_connection().identity,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "awaiting_approval",
             "description": fix_request,
@@ -673,7 +679,7 @@ async def agent_run(
 
     return {
         "status": "awaiting_approval",
-        "execution_id": execution_id,
+        "execution_id": execution_id, "aws_identity": get_connection().identity,
         "issue": issue,
         "hcl": hcl,
         "plan_output": plan_result.get("plan_output", ""),
@@ -685,12 +691,12 @@ async def agent_run(
 
 
 @mcp.tool()
+@aws_operation('aws_region', execution=True, mutating=True)
 def agent_approve(
     execution_id: str,
     approved: bool,
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Approve or reject an agent-generated fix plan."""
     if not approved:
@@ -706,15 +712,12 @@ def agent_approve(
     history = get_execution_history()
     entry = next((e for e in history if e.get("execution_id") == execution_id), {})
 
+    require_record_connection(execution_id, aws_region)
+
     if entry.get("action_type") == "sg_revoke":
         sg_id = entry.get("sg_id", "")
         port  = int(entry.get("port", 22))
-        creds = {
-            "aws_access_key_id":     aws_access_key_id,
-            "aws_secret_access_key": aws_secret_access_key,
-            "aws_region":            aws_region,
-        } if aws_access_key_id else None
-        result  = revoke_sg_ingress_rule(sg_id, port, aws_region, creds)
+        result  = revoke_sg_ingress_rule(sg_id, port, aws_region)
         success = result.get("success", False)
         status  = "complete" if success else "failed"
         msg     = result.get("message", "")
@@ -734,12 +737,7 @@ def agent_approve(
             "error": msg if not success else None,
         }
 
-    aws_creds = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            aws_region,
-    } if aws_access_key_id else None
-    apply_result = run_terraform_apply(execution_id, aws_creds)
+    apply_result = run_terraform_apply(execution_id)
     status = "complete" if apply_result.get("success") else "failed"
     log_execution_update(
         execution_id,
@@ -759,21 +757,18 @@ def agent_approve(
 
 
 @mcp.tool()
+@aws_operation('region', scan=True, mutating=True)
 def revoke_open_ingress_rule(
     sg_id: str,
     port: int,
-    region: str = "us-east-1",
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
+    scan_id: str,
+    region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Revoke all 0.0.0.0/0 and ::/0 ingress rules for a specific port on a security group."""
-    credentials = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            region,
-    } if aws_access_key_id else None
 
-    return revoke_sg_ingress_rule(sg_id, port, region, credentials)
+    require_scan_connection(scan_id, region)
+    return revoke_sg_ingress_rule(sg_id, port, region)
 
 
 @mcp.tool()
@@ -787,20 +782,15 @@ def mark_execution_resolved(execution_id: str) -> dict:
 
 
 @mcp.tool()
+@aws_operation('aws_region', execution=True, mutating=True)
 async def rollback_execution(
     execution_id: str,
-    aws_access_key_id: str = "",
-    aws_secret_access_key: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
+    expected_account_id: str = "",
 ) -> dict:
     """Destroy resources created by a previous terraform apply (rollback)."""
-    aws_creds = {
-        "aws_access_key_id":     aws_access_key_id,
-        "aws_secret_access_key": aws_secret_access_key,
-        "aws_region":            aws_region,
-    } if aws_access_key_id else None
 
-    result = await asyncio.to_thread(run_terraform_destroy, execution_id, aws_creds)
+    result = await asyncio.to_thread(run_terraform_destroy, execution_id)
     status = "rolled_back" if result["success"] else "rollback_failed"
     log_execution_update(execution_id, {
         "status":         status,
@@ -821,6 +811,7 @@ try:
         seed_all()
 except Exception:
     _RAG_AVAILABLE = False
+    logging.getLogger(__name__).exception("Knowledge base initialization failed; /ready will report unavailable")
 
 
 @mcp.tool()
@@ -973,20 +964,23 @@ async def ollama_status(base_url: str = "http://localhost:11434") -> dict:
 
 
 @mcp.resource("aws://findings/{region}")
+@aws_operation('region')
 def aws_findings_resource(region: str) -> dict:
     """Latest security findings for an AWS region, pulled on demand.
 
     URI pattern: aws://findings/{region}
     Example:     aws://findings/us-east-1
     """
-    scan_data = {
-        "ec2": scan_ec2(region=region),
-        "s3": scan_s3(),
-        "iam": scan_iam(),
-        "security_groups": scan_security_groups(region=region),
-        "vpc": scan_vpc(region=region),
-    }
+    scan_data = _collect_scan(region)
+    scan_errors = _scan_errors(scan_data)
+    if scan_errors:
+        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
+
     findings = run_security_analysis(scan_data)
+    for finding in findings:
+        if scan_data.get("scan_id"):
+            finding["scan_id"] = scan_data["scan_id"]
+            finding["aws_identity"] = scan_data["aws_identity"]
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for f in findings:
         counts[f.get("severity", "LOW")] = counts.get(f.get("severity", "LOW"), 0) + 1
@@ -999,6 +993,7 @@ def aws_findings_resource(region: str) -> dict:
 
 
 @mcp.resource("aws://cost-summary/{region}")
+@aws_operation('region')
 def aws_cost_summary_resource(region: str) -> dict:
     """Latest AWS cost summary for the account, pulled on demand.
 
@@ -1039,90 +1034,21 @@ async def _ollama_pull_endpoint(request: Request):
     )
 
 
-async def _upload_document_endpoint(request: Request) -> JSONResponse:
-    """POST /rag/documents/upload — multipart file upload to ChromaDB."""
-    import io
-    try:
-        form = await request.form()
-        file = form.get("file")
-        doc_id = str(form.get("doc_id", ""))
-        resource_type = str(form.get("resource_type", "general"))
-
-        if not file or not doc_id.strip():
-            return JSONResponse(
-                {"message": "file and doc_id are required"}, status_code=422
-            )
-
-        if not _RAG_AVAILABLE:
-            return JSONResponse({"message": "RAG not available"}, status_code=500)
-
-        content = await file.read()
-        filename = getattr(file, "filename", "") or ""
-
-        if filename.lower().endswith(".pdf"):
-            try:
-                import PyPDF2
-                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
-                pages = [page.extract_text() or "" for page in pdf_reader.pages]
-                text = "\n\n".join(pages).strip()
-            except Exception as e:
-                return JSONResponse({"message": f"PDF parse error: {e}"}, status_code=422)
-        else:
-            text = content.decode("utf-8", errors="replace").strip()
-
-        if not text:
-            return JSONResponse(
-                {"message": "No text could be extracted from the file."}, status_code=422
-            )
-
-        result = knowledge_base.add_document(
-            doc_id=doc_id,
-            text=text,
-            metadata={"resource_type": resource_type, "filename": filename},
-        )
-        return JSONResponse(
-            {"chunks_added": result.get("chunks_added", 0), "doc_id": doc_id}
-        )
-    except Exception as e:
-        return JSONResponse({"message": str(e)}, status_code=500)
-
-
 def create_app():
-    from starlette.routing import Route
+    """Compatibility entrypoint delegating to the shared HTTP application."""
+    from http_app import create_app as build_http_app
 
-    base_app = create_streamable_http_app(mcp, streamable_http_path="/mcp")
-
-    base_app.router.routes.append(
-        Route("/rag/documents/upload", _upload_document_endpoint, methods=["POST"])
-    )
-    base_app.router.routes.append(
-        Route("/api/ollama/status", _ollama_status_endpoint, methods=["GET"])
-    )
-    base_app.router.routes.append(
-        Route("/api/ollama/pull", _ollama_pull_endpoint, methods=["POST"])
-    )
-
-    base_app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["mcp-session-id"],
-    )
-
-    return base_app
+    return build_http_app()
 
 
 if __name__ == "__main__":
     import sys
 
-    # Recover disk space from stranded workdirs left by previous sessions.
-    # Removes plan-only dirs (no tfstate) older than 7 days; keeps applied dirs for rollback.
-    _purge = purge_old_workdirs(older_than_days=7)
-    if _purge["removed"]:
-        print(f"Startup cleanup: removed {_purge['removed']} old workdirs "
-              f"({_purge['freed_bytes'] / 1_073_741_824:.1f} GB freed)")
+    # Reuse this module when the shared factory imports mcp_server. Otherwise
+    # `python mcp_server.py` would register and seed the tools a second time.
+    sys.modules["mcp_server"] = sys.modules[__name__]
+    from services.storage import get_execution_store
+    get_execution_store().initialize()
 
     # stdio mode: launched by Claude Desktop as a subprocess.
     # Pass --stdio (or set MCP_TRANSPORT=stdio) to enable.

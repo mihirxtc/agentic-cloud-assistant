@@ -21,10 +21,11 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 from fastmcp import Client
-from pydantic import Field, create_model
+from pydantic import ConfigDict, Field, create_model
 
 _TOOL_GROUPS: dict[str, str] = {
     "health_check":                       "Health",
+    "aws_connection_identity":            "AWS Connection",
     "full_aws_scan":                      "AWS Scanning",
     "scan_ec2_instances":                 "AWS Scanning",
     "scan_s3_buckets":                    "AWS Scanning",
@@ -103,7 +104,7 @@ def _build_input_model(tool_name: str, schema: dict):
         annotation = py_type if is_required else Optional[py_type]
         fields[field_name] = (annotation, Field(default=default, description=description))
 
-    return create_model(f"{tool_name}Input", **fields)
+    return create_model(f"{tool_name}Input", __config__=ConfigDict(extra="forbid"), **fields)
 
 
 def _make_handler(tool_name: str, mcp_instance, input_model):

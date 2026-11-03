@@ -6,9 +6,11 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+from services.storage import chroma_directory, prepare_chroma_storage
+
 logger = logging.getLogger(__name__)
 
-CHROMA_DB_PATH = os.path.join(os.path.dirname(__file__), "../../chroma_db")
+CHROMA_DB_PATH = str(chroma_directory())
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 COLLECTION_NAME = "security_knowledge"
 CHUNK_SIZE = 400
@@ -17,6 +19,7 @@ CHUNK_OVERLAP = 50
 
 class SecurityKnowledgeBase:
     def __init__(self):
+        self.storage_path = prepare_chroma_storage(target=CHROMA_DB_PATH)
         self.client = chromadb.PersistentClient(
             path=os.path.abspath(CHROMA_DB_PATH),
             settings=Settings(anonymized_telemetry=False),

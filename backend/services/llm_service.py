@@ -24,8 +24,7 @@ async def chat_with_groq(
 
     if not resolved_key:
         return (
-            "No Groq API key provided. Please add GROQ_API_KEY to .env "
-            "or enter your key in the chat interface."
+            "Groq is not configured. Ask the operator to configure GROQ_API_KEY on the server."
         )
 
     system_prompt = (
@@ -347,8 +346,7 @@ async def chat_with_anthropic(
 
     if not resolved_key:
         return (
-            "No Anthropic API key provided. Please add ANTHROPIC_API_KEY "
-            "to .env or enter your key in the chat interface."
+            "Anthropic is not configured. Ask the operator to configure ANTHROPIC_API_KEY on the server."
         )
 
     system_prompt = (

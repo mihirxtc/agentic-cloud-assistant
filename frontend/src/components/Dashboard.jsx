@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useAuth } from '../contexts/AuthContext'
-import { useApiKeys } from '../contexts/ApiKeyContext'
+import { useAuth } from '../contexts/useAuth'
+import { useApiKeys } from '../contexts/useApiKeys'
 import { computeHealthScore } from '../utils/scoring'
 import { callTool } from '../api/mcpClient'
+import toast from 'react-hot-toast'
 import Topbar                from './ui/Topbar'
 import InfrastructurePanel   from './panels/InfrastructurePanel'
 import SecurityPanel         from './panels/SecurityPanel'
@@ -16,7 +17,7 @@ import KnowledgeBasePanel    from './panels/KnowledgeBasePanel'
 const AUTO_REFRESH_MS = 90_000 // re-scan every 90 s once data is loaded
 
 export default function Dashboard({ onOpenSettings }) {
-  const { keys }   = useApiKeys()
+  const { keys, serverConfig, awsIdentity, awsIdentityError, awsIdentityLoading, refreshAwsIdentity } = useApiKeys()
   const { logout } = useAuth()
 
   const [infra,           setInfra]           = useState(null)
@@ -31,12 +32,6 @@ export default function Dashboard({ onOpenSettings }) {
 
   const infraLoadingRef = useRef(false)
 
-  const getApiKey = () => {
-    if (keys.model === 'groq')      return keys.groq_key
-    if (keys.model === 'anthropic') return keys.anthropic_key
-    return keys.ollama_url
-  }
-
   const runInfra = useCallback(async () => {
     if (infraLoadingRef.current) return
     infraLoadingRef.current = true
@@ -44,7 +39,7 @@ export default function Dashboard({ onOpenSettings }) {
     try {
       setInfra(await callTool('full_aws_scan', { region: keys.region || 'us-east-1' }))
       setLastRefresh(new Date())
-    } finally {
+    } catch (error) { setInfra(null); toast.error(error.message) } finally {
       setInfraLoading(false)
       infraLoadingRef.current = false
     }
@@ -57,27 +52,25 @@ export default function Dashboard({ onOpenSettings }) {
     return () => clearInterval(id)
   }, [infra, runInfra])
 
-  const runSecurity = async () => {
+  const runSecurity = useCallback(async () => {
     setSecurityLoading(true)
     try {
       const d = await callTool('run_security_analysis_with_summary', {
         model:   keys.model,
-        api_key: getApiKey(),
         region:  keys.region || 'us-east-1',
       })
       setSecurity(d)
       setSecurityScore(computeHealthScore(d.findings))
-    } finally { setSecurityLoading(false) }
-  }
+    } catch (error) { setSecurity(null); setSecurityScore(null); toast.error(error.message) } finally { setSecurityLoading(false) }
+  }, [keys.model, keys.region])
 
   const runCost = async () => {
     setCostLoading(true)
     try {
       setCost(await callTool('get_cost_with_summary', {
         model:   keys.model,
-        api_key: getApiKey(),
       }))
-    } finally { setCostLoading(false) }
+    } catch (error) { setCost(null); toast.error(error.message) } finally { setCostLoading(false) }
   }
 
   const onFix = (finding) => {
@@ -95,10 +88,9 @@ export default function Dashboard({ onOpenSettings }) {
     if (!port) throw new Error(`No direct fix available for rule ${finding.rule}`)
     const result = await callTool('revoke_open_ingress_rule', {
       sg_id:                 finding.resource_id,
+      scan_id:               finding.scan_id,
       port,
       region:                keys.region            || 'us-east-1',
-      aws_access_key_id:     keys.aws_access_key    || '',
-      aws_secret_access_key: keys.aws_secret_key    || '',
     })
     if (!result.success) throw new Error(result.message)
     // Re-scan security after a short delay so AWS state settles
@@ -111,41 +103,47 @@ export default function Dashboard({ onOpenSettings }) {
     setTimeout(runInfra, 3000) // brief delay so AWS state settles
   }, [runInfra])
 
-  const hasKeys = !!(keys.groq_key || keys.anthropic_key || keys.ollama_url)
+  const hasKeys = !!serverConfig?.providers?.[keys.model]
 
   return (
     <div>
       <Topbar
         securityScore={securityScore}
         onOpenSettings={onOpenSettings}
-        onLogout={logout}
+        onLogout={async () => { try { await logout() } catch (error) { toast.error(error.message) } }}
         region={keys.region || 'us-east-1'}
         hasKeys={hasKeys}
+        awsIdentity={awsIdentity}
       />
+      <div role="status" style={{ padding: '12px 24px', color: 'var(--text-secondary)', fontSize: 12 }}>
+        {awsIdentityLoading ? 'Verifying AWS account…' : awsIdentityError || (awsIdentity
+          ? `Verified account ${awsIdentity.account_id} · ${awsIdentity.region}` : 'AWS connection is not verified')}
+        <button className="aca-btn-ghost small" style={{ marginLeft: 12 }} onClick={refreshAwsIdentity} disabled={awsIdentityLoading}>
+          Verify connection
+        </button>
+      </div>
       <div className="aca-grid">
+        <fieldset aria-label="AWS operations" disabled={!awsIdentity} style={{ display: 'contents' }}>
         <InfrastructurePanel
           data={infra} loading={infraLoading}
           onScan={runInfra} lastRefresh={lastRefresh}
         />
         <SecurityPanel data={security} loading={securityLoading} onScan={runSecurity} onFix={onFix} onDirectFix={onDirectFix} />
         <CostPanel data={cost} loading={costLoading} onLoad={runCost} />
-        <ChatPanel model={keys.model || 'groq'} apiKey={getApiKey()} />
+        <ChatPanel model={keys.model || 'groq'} />
         <TerraformPanel
-          model={keys.model || 'groq'} apiKey={getApiKey()}
-          awsAccessKey={keys.aws_access_key} awsSecretKey={keys.aws_secret_key}
+          model={keys.model || 'groq'}
           awsRegion={keys.region || 'us-east-1'}
           prefill={prefill} onPrefillConsumed={() => setPrefill(null)}
           onApplyComplete={onInfraChanged}
         />
-        <ExecutionHistoryPanel />
         <SecurityAgentPanel
           region={keys.region || 'us-east-1'}
           model={keys.model || 'groq'}
-          apiKey={getApiKey()}
-          awsAccessKey={keys.aws_access_key}
-          awsSecretKey={keys.aws_secret_key}
           onApplyComplete={onInfraChanged}
         />
+        </fieldset>
+        <ExecutionHistoryPanel />
         <KnowledgeBasePanel />
       </div>
     </div>

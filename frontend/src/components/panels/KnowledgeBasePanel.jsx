@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { callTool } from '../../api/mcpClient'
-import { useApiKeys } from '../../contexts/ApiKeyContext'
+import { useApiKeys } from '../../contexts/useApiKeys'
 import { RESOURCE_TYPES } from '../../utils/constants'
 
 function KBQuery() {
@@ -15,14 +15,10 @@ function KBQuery() {
     if (!q.trim() || loading) return
     setLoading(true)
     try {
-      const activeKey = keys.model === 'anthropic' ? keys.anthropic_key
-                      : keys.model === 'ollama'    ? keys.ollama_url
-                      : keys.groq_key
       const r = await callTool('rag_query_tool', {
         question:      q,
         n_results:     3,
         model:         keys.model || 'groq',
-        api_key:       activeKey,
         resource_type: rtype === 'All' ? undefined : rtype,
       })
       setRes(r)
@@ -105,7 +101,7 @@ function KBManage() {
     setDocs(r.documents || [])
   }
 
-  useEffect(() => { refresh() }, []) // eslint-disable-line
+  useEffect(() => { refresh() }, [])
 
   const add = async () => {
     if (!docId || !text) return

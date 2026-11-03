@@ -34,6 +34,7 @@ tfplan
 chroma_db/
 
 backend/execution_log.json
+backend/data/
 backend/benchmark_results.json
 
 .vscode/

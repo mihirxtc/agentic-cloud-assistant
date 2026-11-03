@@ -90,8 +90,8 @@ def test_probe_ollama_unavailable():
 
 def test_probe_ollama_no_catalog_models():
     version_resp = _mock_response(200, {"version": "0.3.12"})
-    # Tags returns a non-catalog model (e.g. user has llama3.2:3b locally)
-    tags_resp = _mock_response(200, {"models": [{"name": "llama3.2:3b", "size": 0}]})
+    # Tags returns a model outside the supported catalog
+    tags_resp = _mock_response(200, {"models": [{"name": "unsupported-test-model:latest", "size": 0}]})
 
     mock_client = AsyncMock()
     mock_client.get = AsyncMock(side_effect=[version_resp, tags_resp])

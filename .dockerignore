@@ -16,6 +16,7 @@ frontend/dist
 
 # Runtime data — mounted as Docker volumes
 backend/chroma_db
+backend/data
 backend/terraform_workdirs
 backend/execution_log.json
 backend/benchmark_results.json

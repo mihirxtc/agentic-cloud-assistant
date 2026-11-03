@@ -1,7 +1,7 @@
 import json
 from datetime import date
 
-import boto3
+from services.aws_connection import get_connection
 from dateutil.relativedelta import relativedelta
 
 from services.llm_service import (
@@ -11,18 +11,7 @@ from services.llm_service import (
 )
 
 
-def get_aws_session(credentials: dict) -> boto3.Session:
-    """Build a per-request boto3 Session from an explicit credentials dict."""
-    return boto3.Session(
-        aws_access_key_id=credentials.get("aws_access_key_id"),
-        aws_secret_access_key=credentials.get("aws_secret_access_key"),
-        region_name=credentials.get(
-            "aws_region", credentials.get("region", "us-east-1")
-        ),
-    )
-
-
-def get_current_month_cost(credentials: dict = None) -> dict:
+def get_current_month_cost() -> dict:
     """
     Retrieve the total AWS spend for the current calendar month.
 
@@ -41,9 +30,7 @@ def get_current_month_cost(credentials: dict = None) -> dict:
     """
     try:
         ce = (
-            get_aws_session(credentials).client("ce", region_name="us-east-1")
-            if credentials
-            else boto3.client("ce", region_name="us-east-1")
+            get_connection().client("ce", region_name="us-east-1")
         )
 
         start = date.today().replace(day=1)
@@ -86,7 +73,7 @@ def get_current_month_cost(credentials: dict = None) -> dict:
         }
 
 
-def get_monthly_trend(months: int = 3, credentials: dict = None) -> list:
+def get_monthly_trend(months: int = 3) -> list:
     """
     Retrieve the total AWS spend for each of the last N calendar months.
 
@@ -109,9 +96,7 @@ def get_monthly_trend(months: int = 3, credentials: dict = None) -> list:
     """
     try:
         ce = (
-            get_aws_session(credentials).client("ce", region_name="us-east-1")
-            if credentials
-            else boto3.client("ce", region_name="us-east-1")
+            get_connection().client("ce", region_name="us-east-1")
         )
 
         today = date.today()
@@ -151,7 +136,7 @@ def get_monthly_trend(months: int = 3, credentials: dict = None) -> list:
         return []
 
 
-def get_cost_by_service(credentials: dict = None) -> list:
+def get_cost_by_service() -> list:
     """
     Retrieve AWS spend for the current month, broken down by service.
 
@@ -172,9 +157,7 @@ def get_cost_by_service(credentials: dict = None) -> list:
     """
     try:
         ce = (
-            get_aws_session(credentials).client("ce", region_name="us-east-1")
-            if credentials
-            else boto3.client("ce", region_name="us-east-1")
+            get_connection().client("ce", region_name="us-east-1")
         )
 
         start = date.today().replace(day=1)
