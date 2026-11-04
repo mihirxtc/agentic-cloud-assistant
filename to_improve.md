@@ -12,7 +12,7 @@ Default: single operator, Docker Compose, one configured AWS account.
 - [x] 6. Enforce transactional execution transitions, saved-plan approvals, idempotency, reviewed direct changes and separately approved destroy plans.
 - [x] 7. Isolate Terraform in a non-root worker; enforce provider/HCL policy; retain lockfiles; validate paths; align Terraform and S3 locking versions. Implementation and published Step 7 CI image/isolation smoke acceptance complete.
 - [x] 8. Persist background jobs and real progress; handle interruptions without blindly retrying mutations. Core implementation published; ambiguous outcomes remain locked for validated offline recovery.
-- [x] 9. Correct filtered RAG retrieval and document replacement; evaluate retrieval; correct health scoring and cost periods. Implemented locally; see the validation and unrelated Ollama-test caveat below.
+- [x] 9. Correct filtered RAG retrieval and document replacement; evaluate retrieval; correct health scoring and cost periods. Published as 13523de; see the validation and unrelated local Ollama-test caveat below.
 - [ ] 10. Update integration tests, exercise mocked end-to-end workflow, redact logs, document setup/backups/recovery; verify real changes only in a sandbox account.
 
 ## Acceptance
@@ -556,4 +556,6 @@ with pinned Chroma. Frontend tests/lint/build, source compilation and dependency
 checks passed. An unrelated concurrent Ollama-test edit causes a syntax error in
 default discovery and was preserved pending the user's preference; see status.md.
 No live cloud/billing/LLM calls, deployment or existing operator data migration.
-Changes are local/uncommitted/unpushed. Next is Step 10 after explanation/approval.
+Step 9 was committed as `13523de` and pushed to GitHub `main` on 4 November 2026.
+Unrelated Ollama-test edits and old analysis/handoff exports remain local. CI for
+this commit has not yet been verified. Next is Step 10 after explanation/approval.

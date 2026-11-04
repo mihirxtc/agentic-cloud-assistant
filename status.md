@@ -5,7 +5,7 @@ Updated: **4 November 2026** (Europe/London).
 ## Current position
 
 **Improvement steps 1–9 are implemented. Step 10 has not started.**
-Step 9 changes are local, uncommitted and unpushed.
+Step 9 was committed as `13523de` and pushed to GitHub `main` on 4 November 2026.
 Step 8 was implemented after user approval, committed as `4df1cc6` and pushed
 to GitHub `main` on 4 November 2026.
 Steps 1–7 are published on GitHub `main`: implementation commit `26a2522`, followed
@@ -175,7 +175,8 @@ suite is claimed. Do not silently stage these unrelated changes with Step 9.
     and controlled sandbox-account deployment validation.
 
 Steps 1–8 are published (Step 8 implementation `4df1cc6`, publication `b361432`).
-Step 9 changes and this checkpoint are local and have not been committed/pushed.
+Step 9 changes were committed as `13523de` and pushed to `main`; CI has not yet
+been verified for that commit. The unrelated Ollama-test edits remain local.
 Pre-existing PROJECT-ANALYSIS.md and project-handoff/ remain local and untracked.
 Explain Step 10's changes and benefit before implementing it; obtain approval.
 **Do not start Step 10 automatically.** No deployment or live AWS change is
