@@ -6,7 +6,8 @@ Updated: **4 November 2026** (Europe/London).
 
 **Improvement steps 1–7 are implemented. Step 8 is next and has not started.**
 Steps 5–6 completed locally on 3 November; Step 7 completed on 4 November 2026.
-Steps 5–7 and this checkpoint are uncommitted and have not been pushed.
+Steps 5–7 were committed as `26a2522` and pushed to GitHub `main` on
+4 November 2026. A documentation follow-up records that publication.
 **Step 7 container-runtime acceptance is pending:** Docker socket permissions
 prevented local image builds and smoke tests; the configured CI check has not run.
 
@@ -258,8 +259,8 @@ archiving and full runtime compatibility remain operational follow-ups.
 ## Continuation instructions
 
 Step 7 implementation is finished; wait for approval before starting Step 8.
-Keep the pending container build/smoke acceptance check visible in the next session. The latest code and
-checkpoint updates are saved locally and have not been committed or pushed.
+Keep the pending container build/smoke acceptance check visible in the next session. Steps 5–7 code and checkpoint updates are committed as `26a2522` and pushed
+to GitHub `main`; Step 8 remains unstarted.
 Pre-existing `PROJECT-ANALYSIS.md`
 and `project-handoff/` remain local and were excluded from the published commit.
 

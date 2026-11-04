@@ -488,3 +488,13 @@ GitHub main still contains Steps 1–4 at 21813ae.
 Next: explain Step 8 (durable jobs, real progress and controlled reconciliation)
 and obtain approval before implementing it. Retain the pending Step 7 container
 acceptance check in the handoff; do not claim it passed.
+
+## Publication checkpoint — 4 November 2026
+
+Steps 5–7 were committed as `26a2522` and successfully pushed to GitHub `main`.
+Earlier uncommitted/unpushed statements above describe their historical checkpoints.
+Frontend tests, lint and production build passed again before publication. Backend
+tests were not rerun because the previous temporary Python environment no longer
+exists; the last recorded result remains 273 passing tests. Step 7 container runtime
+acceptance is still pending, and Step 8 has not started. Pre-existing analysis and
+handoff exports remain local.
