@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../contexts/useAuth'
 import { useApiKeys } from '../contexts/useApiKeys'
-import { isAssessmentComplete } from '../utils/assessment'
 import { computeHealthScore } from '../utils/scoring'
 import { callTool } from '../api/mcpClient'
 import toast from 'react-hot-toast'
@@ -62,7 +61,7 @@ export default function Dashboard({ onOpenSettings }) {
         region:  keys.region || 'us-east-1',
       })
       setSecurity(d)
-      setSecurityScore(isAssessmentComplete(d) ? computeHealthScore(d.findings) : null)
+      setSecurityScore(computeHealthScore(d))
     } catch (error) { setSecurity(null); setSecurityScore(null); toast.error(error.message) } finally { setSecurityLoading(false) }
   }, [keys.model, keys.region])
 

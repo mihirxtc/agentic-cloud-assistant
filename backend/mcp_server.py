@@ -29,10 +29,7 @@ from services.aws_scanner import (
     scan_sg_usage,
 )
 from services.cost_analyzer import (
-    detect_cost_anomaly,
-    get_cost_by_service,
-    get_current_month_cost,
-    get_monthly_trend,
+    get_cost_report,
 )
 from services.execution_service import (
     get_execution_history,
@@ -209,15 +206,10 @@ async def run_security_analysis_with_summary(
 @durable
 def estimate_costs(region: str = "", time_period_days: int = 30, expected_account_id: str = "") -> dict:
     """Retrieve AWS spend data and detect cost anomalies via Cost Explorer."""
-    months = max(1, time_period_days // 30)
-    monthly_trend = get_monthly_trend(months=months)
-    return {
-        "current_month": get_current_month_cost(),
-        "monthly_trend": monthly_trend,
-        "by_service": get_cost_by_service(),
-        "anomaly": detect_cost_anomaly(monthly_trend),
-        "months_fetched": months,
-    }
+    if not isinstance(time_period_days, int) or not 1 <= time_period_days <= 365:
+        raise ValueError('time_period_days must be between 1 and 365')
+    # Legacy parameter requests an approximate calendar history horizon, rounded up.
+    return get_cost_report(months=max(2, min(12, (time_period_days + 29) // 30)))
 
 
 @mcp.tool()
@@ -231,33 +223,23 @@ async def get_cost_with_summary(
     expected_account_id: str = "",
 ) -> dict:
     """Retrieve AWS cost data and generate an LLM cost-optimisation summary."""
-    monthly_trend = get_monthly_trend(months=3)
-    current_month = get_current_month_cost()
-    by_service = get_cost_by_service()
-    anomaly = detect_cost_anomaly(monthly_trend)
-
-    cost_summary = {
-        "current_month": current_month,
-        "monthly_trend": monthly_trend,
-        "by_service": by_service[:5],
-        "anomaly": anomaly,
-    }
-
-    summary_prompt = (
-        "You are an AWS cost-optimisation expert. Analyse this cost data and "
-        "provide 3-4 actionable recommendations in plain English:\n\n"
-        + json.dumps(cost_summary, indent=2, default=str)
-    )
-    progress("Generating cost summary")
-    llm_summary = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
-
-    return {
-        "current_month": current_month,
-        "monthly_trend": monthly_trend,
-        "by_service": by_service,
-        "anomaly": anomaly,
-        "llm_summary": llm_summary,
-    }
+    report = get_cost_report(months=3)
+    report['llm_summary'] = ('Billing data is incomplete or unavailable. Review the reported periods and errors.'
+                             if report['status'] != 'complete' else 'Completed billing periods and month-to-date spend are shown separately.')
+    # Do not ask a model to invent conclusions from failed/empty billing responses.
+    if report['status'] == 'complete':
+        summary_prompt = (
+            'Summarise this AWS billing report within its reported scope. '
+            'Month-to-date is partial; only comparison contains a valid completed-month percentage. '
+            'Costs may be estimated and UnblendedCost does not establish a final invoice. '
+            'Do not infer usage causes from service totals alone.\n' + json.dumps(report, default=str)
+        )
+        try:
+            progress('Generating cost summary')
+            report['llm_summary'] = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
+        except Exception:
+            report['summary_error'] = 'Model summary unavailable; billing results are retained'
+    return report
 
 
 @mcp.tool()
@@ -465,9 +447,10 @@ async def aws_chat(
 
     connection = get_connection()
     def build_context():
-        return {**_collect_scan(connection.region),
-                "cost_current_month": get_current_month_cost(), "cost_monthly_trend": get_monthly_trend(months=3),
-                "cost_by_service": get_cost_by_service(), "sg_usage": scan_sg_usage(region=connection.region)}
+        report = get_cost_report(months=3)
+        return {**_collect_scan(connection.region), 'cost_report': report,
+                'cost_current_month': report['current_month'], 'cost_monthly_trend': report['monthly_trend'],
+                'cost_by_service': report['by_service'], 'sg_usage': scan_sg_usage(region=connection.region)}
     scan_data = cached_context(connection, build_context)
 
     augmented_message = message
@@ -786,14 +769,7 @@ def aws_cost_summary_resource(region: str) -> dict:
     URI pattern: aws://cost-summary/{region}
     Note: Cost Explorer is global — region is informational only.
     """
-    monthly_trend = get_monthly_trend(months=3)
-    return {
-        "region": region,
-        "current_month": get_current_month_cost(),
-        "monthly_trend": monthly_trend,
-        "by_service": get_cost_by_service(),
-        "anomaly": detect_cost_anomaly(monthly_trend),
-    }
+    return {**get_cost_report(months=3), 'region': region}
 
 
 async def _ollama_status_endpoint(request: Request) -> JSONResponse:

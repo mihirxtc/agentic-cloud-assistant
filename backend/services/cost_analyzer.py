@@ -1,333 +1,194 @@
-import json
-from datetime import date
+"""Cost Explorer reports with explicit calendar periods and unavailable states."""
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 
-from services.aws_connection import get_connection
 from dateutil.relativedelta import relativedelta
-
-from services.llm_service import (
-    chat_with_anthropic,
-    chat_with_groq,
-    chat_with_ollama,
-)
+from services.aws_connection import get_connection
 
 
-def get_current_month_cost() -> dict:
-    """
-    Retrieve the total AWS spend for the current calendar month.
+def utc_today():
+    return datetime.now(timezone.utc).date()
 
-    Calls the AWS Cost Explorer API with MONTHLY granularity
-    from the first day of the current month to today.
 
-    Returns:
-        dict with keys:
-          amount   (float)  — total spend rounded to 2 decimal places
-          currency (str)    — e.g. "USD"
-          period   (str)    — human-readable date range e.g. "2026-03-01 to 2026-03-21"
+def _bounds(start, end):
+    return {'start': start.isoformat(), 'end': end.isoformat(), 'end_exclusive': True}
 
-        On any error, returns safe defaults with an "error" key added.
-        The error key allows the /cost endpoint to surface the reason
-        without crashing.
-    """
+
+def _query(start, end, grouped=False):
+    """Collect every page or report failure; incomplete totals are never zero."""
+    if start >= end:
+        return {'status': 'not_available', 'rows': [], 'reason': 'No completed days in this period'}
+    rows, seen = [], set()
+    request = {'TimePeriod': {'Start': start.isoformat(), 'End': end.isoformat()},
+               'Granularity': 'MONTHLY', 'Metrics': ['UnblendedCost']}
+    if grouped:
+        request['GroupBy'] = [{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
     try:
-        ce = (
-            get_connection().client("ce", region_name="us-east-1")
-        )
-
-        start = date.today().replace(day=1)
-        end = date.today()
-
-        # Cost Explorer requires Start < End. On the 1st of the month start==end,
-        # so advance end by one day to satisfy the constraint.
-        if end <= start:
-            from datetime import timedelta
-            end = start + timedelta(days=1)
-
-        response = ce.get_cost_and_usage(
-            TimePeriod={
-                "Start": start.strftime("%Y-%m-%d"),
-                "End": end.strftime("%Y-%m-%d"),
-            },
-            Granularity="MONTHLY",
-            Metrics=["UnblendedCost"],
-        )
-
-        results = response.get("ResultsByTime", [])
-        if not results:
-            return {"amount": 0.0, "currency": "USD", "period": f"{start} to {end}"}
-        result = results[0]
-        amount = result["Total"]["UnblendedCost"]["Amount"]
-        currency = result["Total"]["UnblendedCost"]["Unit"]
-
-        return {
-            "amount": round(float(amount), 2),
-            "currency": currency,
-            "period": f"{start} to {end}",
-        }
-
-    except Exception as e:
-        return {
-            "amount": 0.0,
-            "currency": "USD",
-            "period": "unavailable",
-            "error": str(e),
-        }
-
-
-def get_monthly_trend(months: int = 3) -> list:
-    """
-    Retrieve the total AWS spend for each of the last N calendar months.
-
-    Uses relativedelta for month arithmetic because timedelta works in days.
-    Subtracting 90 days from March 1st gives January 1st (correct), but
-    subtracting 90 days from March 15th gives December 15th (wrong).
-    relativedelta(months=3) always navigates by full calendar months.
-
-    Parameters:
-        months (int): How many months of history to retrieve. Default is 3.
-
-    Returns:
-        list of dicts, each with:
-          month    (str)   — "YYYY-MM" e.g. "2026-01"
-          amount   (float) — spend for that month
-          currency (str)   — e.g. "USD"
-
-        Sorted chronologically (oldest first).
-        Returns an empty list on any error.
-    """
-    try:
-        ce = (
-            get_connection().client("ce", region_name="us-east-1")
-        )
-
-        today = date.today()
-
-        start = (today - relativedelta(months=months)).replace(day=1)
-        end = today
-
-        response = ce.get_cost_and_usage(
-            TimePeriod={
-                "Start": start.strftime("%Y-%m-%d"),
-                "End": end.strftime("%Y-%m-%d"),
-            },
-            Granularity="MONTHLY",
-            Metrics=["UnblendedCost"],
-        )
-
-        trend = []
-
-        for item in response.get("ResultsByTime", []):
-            month = item["TimePeriod"]["Start"][:7]
-            amount = item["Total"]["UnblendedCost"]["Amount"]
-            currency = item["Total"]["UnblendedCost"]["Unit"]
-
-            trend.append(
-                {
-                    "month": month,
-                    "amount": round(float(amount), 2),
-                    "currency": currency,
-                }
-            )
-
-        trend.sort(key=lambda x: x["month"])
-
-        return trend
-
+        ce = get_connection().client('ce', region_name='us-east-1')
+        while True:
+            page = ce.get_cost_and_usage(**request)
+            batch = page.get('ResultsByTime')
+            if not isinstance(batch, list):
+                raise ValueError('Invalid billing response')
+            rows.extend(batch)
+            token = page.get('NextPageToken')
+            if not token:
+                break
+            if not isinstance(token, str) or token in seen:
+                raise ValueError('Billing pagination did not advance')
+            seen.add(token)
+            request['NextPageToken'] = token
+        return {'status': 'complete' if rows else 'not_available', 'rows': rows,
+                'reason': None if rows else 'Cost Explorer returned no data for this period'}
     except Exception:
-        return []
+        return {'status': 'failed', 'rows': [], 'reason': 'Cost Explorer data unavailable; check billing access and retry'}
 
 
-def get_cost_by_service() -> list:
-    """
-    Retrieve AWS spend for the current month, broken down by service.
-
-    Calls Cost Explorer with GroupBy SERVICE so we get one row per AWS
-    service (e.g. Amazon EC2, Amazon S3, AWS Lambda).
-
-    Services with zero spend are excluded — AWS returns every service
-    the account has ever used, most of which will be $0.00 for any
-    given month. Showing those would clutter the UI.
-
-    Returns:
-        list of dicts sorted by amount descending (most expensive first):
-          service  (str)   — AWS service name e.g. "Amazon EC2"
-          amount   (float) — spend for this month
-          currency (str)   — e.g. "USD"
-
-        Returns an empty list on any error.
-    """
-    try:
-        ce = (
-            get_connection().client("ce", region_name="us-east-1")
-        )
-
-        start = date.today().replace(day=1)
-        end = date.today()
-
-        if end <= start:
-            from datetime import timedelta
-            end = start + timedelta(days=1)
-
-        response = ce.get_cost_and_usage(
-            TimePeriod={
-                "Start": start.strftime("%Y-%m-%d"),
-                "End": end.strftime("%Y-%m-%d"),
-            },
-            Granularity="MONTHLY",
-            Metrics=["UnblendedCost"],
-            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
-        )
-
-        services = []
-        results = response.get("ResultsByTime", [])
-        if not results:
-            return []
-
-        for group in results[0].get("Groups", []):
-            service = group["Keys"][0]
-            amount = group["Metrics"]["UnblendedCost"]["Amount"]
-            currency = group["Metrics"]["UnblendedCost"]["Unit"]
-
-            rounded_amount = round(float(amount), 2)
-            if rounded_amount == 0.0:
-                continue
-
-            services.append(
-                {
-                    "service": service,
-                    "amount": rounded_amount,
-                    "currency": currency,
-                }
-            )
-
-        services.sort(key=lambda x: x["amount"], reverse=True)
-
-        return services
-
-    except Exception:
-        return []
+def _money(metric):
+    amount = Decimal(metric['Amount'])
+    unit = metric['Unit']
+    if not amount.is_finite() or not isinstance(unit, str) or not unit:
+        raise ValueError('Invalid cost metric')
+    return amount, unit
 
 
-def detect_cost_anomaly(monthly_trend: list) -> dict:
-    """
-    Flag a cost anomaly if the most recent month's spend is 20% or more
-    above the previous month's spend.
+def _totals(rows):
+    output = []
+    seen = set()
+    for row in rows:
+        period = row['TimePeriod']
+        start, end = date.fromisoformat(period['Start']), date.fromisoformat(period['End'])
+        if start >= end or (start, end) in seen:
+            raise ValueError('Invalid or repeated billing period')
+        seen.add((start, end))
+        amount, currency = _money(row['Total']['UnblendedCost'])
+        output.append({'month': start.strftime('%Y-%m'), 'amount': float(amount.quantize(Decimal('.01'))),
+                       'currency': currency, **_bounds(start, end), 'estimated': bool(row.get('Estimated', True)),
+                       'complete_month': start.day == 1 and end == start + relativedelta(months=1),
+                       'status': 'complete'})
+    return sorted(output, key=lambda item: item['start'])
 
-    Why 20%?
-      This is a common threshold in FinOps tooling. A small increase
-      (e.g. 5–10%) is expected growth; 20%+ suggests an unexpected
-      change such as a forgotten running resource or a billing error.
 
-    Parameters:
-        monthly_trend (list): Output of get_monthly_trend() — a list of
-                              monthly spend dicts sorted chronologically.
-                              Needs at least 2 entries to compare.
+def get_current_month_cost(as_of=None):
+    today = as_of or utc_today()
+    start = today.replace(day=1)
+    response = _query(start, today)
+    result = {'amount': None, 'currency': None, 'period': f'{start} to {today} (end exclusive)',
+              **_bounds(start, today), 'status': response['status'], 'estimated': None}
+    if response['status'] == 'complete':
+        try:
+            totals = _totals(response['rows'])
+            if len(totals) != 1 or totals[0]['start'] != start.isoformat() or totals[0]['end'] != today.isoformat():
+                raise ValueError('Unexpected month-to-date period')
+            result.update({k: totals[0][k] for k in ('amount', 'currency', 'estimated')})
+            return result
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            result['status'] = 'failed'
+    result['error'] = response.get('reason') or 'Cost Explorer returned an invalid month-to-date result'
+    return result
 
-    Returns:
-        dict with keys:
-          detected   (bool)  — True if spend increased by 20%+
-          message    (str)   — Human-readable explanation
-          percentage (float) — Actual % change (0.0 if not detected)
-    """
+
+def _history(months, as_of):
+    if not isinstance(months, int) or isinstance(months, bool) or not 1 <= months <= 12:
+        raise ValueError('months must be between 1 and 12')
+    end = as_of.replace(day=1)
+    start = end - relativedelta(months=months)
+    response = _query(start, end)
+    result = {'status': response['status'], 'items': [], **_bounds(start, end)}
+    if response['status'] == 'complete':
+        try:
+            items = _totals(response['rows'])
+            expected = [(start + relativedelta(months=i)).isoformat() for i in range(months)]
+            if [item['start'] for item in items] != expected or not all(item['complete_month'] for item in items):
+                raise ValueError('Historical months are missing or incomplete')
+            if len({item['currency'] for item in items}) > 1:
+                raise ValueError('Historical currencies differ')
+            result['items'] = items
+            return result
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            result['status'] = 'failed'
+    result['error'] = response.get('reason') or 'Completed-month history is missing or invalid'
+    return result
+
+
+def get_monthly_trend(months=3, as_of=None):
+    """Only completed calendar months; empty means unavailable, never zero spend."""
+    return _history(months, as_of or utc_today())['items']
+
+
+def _services(as_of):
+    start = as_of.replace(day=1)
+    response = _query(start, as_of, grouped=True)
+    result = {'status': response['status'], 'items': [], **_bounds(start, as_of)}
+    if response['status'] == 'complete':
+        try:
+            services, seen = {}, set()
+            estimated = False
+            for row in response['rows']:
+                if row['TimePeriod'] != {'Start': start.isoformat(), 'End': as_of.isoformat()}:
+                    raise ValueError('Unexpected grouped billing period')
+                estimated |= bool(row.get('Estimated', True))
+                groups = row['Groups']
+                if not isinstance(groups, list):
+                    raise ValueError('Missing service groups')
+                for group in groups:
+                    name = group['Keys'][0]
+                    if not isinstance(name, str) or not name or name in seen:
+                        raise ValueError('Repeated or invalid service group')
+                    seen.add(name)
+                    amount, unit = _money(group['Metrics']['UnblendedCost'])
+                    services[name] = {'service': name, 'amount': float(amount.quantize(Decimal('.01'))), 'currency': unit}
+            if len({item['currency'] for item in services.values()}) > 1:
+                raise ValueError('Service currencies differ')
+            result.update(items=sorted((v for v in services.values() if v['amount'] != 0), key=lambda v: v['amount'], reverse=True), estimated=estimated)
+            return result
+        except (KeyError, IndexError, TypeError, ValueError, InvalidOperation):
+            result['status'] = 'failed'
+    result['error'] = response.get('reason') or 'Cost Explorer returned an invalid service breakdown'
+    return result
+
+
+def get_cost_by_service(as_of=None):
+    return _services(as_of or utc_today())['items']
+
+
+def detect_cost_anomaly(monthly_trend):
+    """Compare the latest two contiguous completed months in a single currency."""
+    unknown = {'status': 'not_available', 'detected': None, 'percentage': None,
+               'message': 'Two comparable completed months are required', 'basis': 'completed_calendar_months'}
     if len(monthly_trend) < 2:
-        return {"detected": False, "message": "", "percentage": 0.0}
-
+        return unknown
     try:
-        current = float(monthly_trend[-1]["amount"])
-        previous = float(monthly_trend[-2]["amount"])
-
-        if previous == 0:
-            return {"detected": False, "message": "", "percentage": 0.0}
-
-        pct_change = ((current - previous) / previous) * 100
-
-        if pct_change >= 20:
-            return {
-                "detected": True,
-                "message": (
-                    f"Spend increased by {pct_change:.1f}% compared to last month "
-                    f"(${previous:.2f} → ${current:.2f})."
-                ),
-                "percentage": round(pct_change, 1),
-            }
-
-        return {"detected": False, "message": "", "percentage": 0.0}
-
-    except Exception:
-        return {"detected": False, "message": "", "percentage": 0.0}
+        previous, current = monthly_trend[-2:]
+        for item in (previous, current):
+            start, end = date.fromisoformat(item['start']), date.fromisoformat(item['end'])
+            if item.get('status') != 'complete' or not item.get('complete_month') or start.day != 1 or end != start + relativedelta(months=1):
+                return unknown
+        if previous['end'] != current['start'] or previous['currency'] != current['currency']:
+            return unknown
+        old, new = Decimal(str(previous['amount'])), Decimal(str(current['amount']))
+        if not old.is_finite() or not new.is_finite() or old <= 0 or new < 0:
+            return {**unknown, 'message': 'Percentage comparison is unavailable for zero or negative billing baselines'}
+        change = (new - old) / old * 100
+        return {'status': 'complete', 'detected': change >= 20, 'percentage': float(change.quantize(Decimal('.1'))),
+                'basis': 'completed_calendar_months', 'current_period': {k: current[k] for k in ('start', 'end', 'amount', 'currency')},
+                'previous_period': {k: previous[k] for k in ('start', 'end', 'amount', 'currency')},
+                'estimated': previous.get('estimated', True) or current.get('estimated', True),
+                'message': f"{previous['month']} to {current['month']}: {change:+.1f}% ({old:.2f} → {new:.2f} {current['currency']})."}
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        return unknown
 
 
-async def get_cost_insights_llm(
-    current_month: dict,
-    monthly_trend: list,
-    by_service: list,
-    anomaly: dict,
-    model: str = "groq",
-    api_key: str = None,
-) -> str:
-    """
-    Send cost data to an LLM and return a plain-English cost summary.
-
-    If there is no cost data at all (amount is 0 and no services), we
-    return a canned explanation rather than calling the LLM — there is
-    nothing useful the LLM can say about an empty dataset.
-
-    Parameters:
-        current_month (dict): Output of get_current_month_cost()
-        monthly_trend (list): Output of get_monthly_trend()
-        by_service    (list): Output of get_cost_by_service()
-        anomaly       (dict): Output of detect_cost_anomaly()
-        model         (str) : Which LLM to use — groq, anthropic, ollama
-        api_key       (str) : Optional user-supplied API key override
-
-    Returns:
-        str: Plain-English cost summary from the LLM, or a fallback
-             string if the LLM call fails or no data is available.
-             Never raises an exception to the caller.
-    """
-    amount = current_month.get("amount", 0)
-    has_error = "error" in current_month
-    no_data = amount == 0.0 and len(by_service) == 0
-
-    if no_data or has_error:
-        error_detail = current_month.get("error", "")
-        return (
-            "No cost data available. This may be because AWS Cost Explorer "
-            "is not enabled for this account, or billing access is not "
-            "configured for the current IAM user. "
-            + (f"AWS error: {error_detail}" if error_detail else "")
-        ).strip()
-
-    prompt = f"""You are an AWS cost optimisation expert.
-
-Here is the current cost data for this AWS account:
-
-Current month spend: ${current_month.get("amount", 0)} USD
-Period: {current_month.get("period", "unknown")}
-
-Monthly trend (last 3 months):
-{json.dumps(monthly_trend, indent=2)}
-
-Cost breakdown by service:
-{json.dumps(by_service, indent=2)}
-
-Anomaly detected: {anomaly.get("detected", False)}
-{anomaly.get("message", "")}
-
-Please provide:
-1. A 2-sentence executive summary of current spend
-2. The top 2 cost drivers and why they cost what they do
-3. Three specific, actionable cost optimisation recommendations
-4. Whether the spending trend looks healthy or concerning
-
-Be specific, reference actual service names and dollar amounts."""
-
-    try:
-        if model == "anthropic":
-            return await chat_with_anthropic(prompt, {}, [], api_key)
-        elif model == "ollama":
-            return await chat_with_ollama(prompt, {}, [], api_key)
-        else:
-            return await chat_with_groq(prompt, {}, [], api_key)
-
-    except Exception as e:
-        return f"Could not generate cost summary: {str(e)}"
+def get_cost_report(months=3, as_of=None):
+    today = as_of or utc_today()
+    current = get_current_month_cost(today)
+    history = _history(months, today)
+    services = _services(today)
+    errors = {name: value['error'] for name, value in (('current_month', current), ('monthly_trend', history), ('by_service', services)) if value.get('error')}
+    statuses = [current['status'], history['status'], services['status']]
+    comparison = detect_cost_anomaly(history['items'])
+    return {'status': 'complete' if all(s == 'complete' for s in statuses) else 'failed' if all(s == 'failed' for s in statuses) else 'partial',
+            'current_month': current, 'monthly_trend': history['items'], 'by_service': services['items'],
+            'coverage': {'current_month': current['status'], 'monthly_trend': history['status'], 'by_service': services['status']},
+            'comparison': comparison, 'anomaly': comparison,
+            'errors': errors, 'as_of': today.isoformat(), 'months_fetched': len(history['items'])}

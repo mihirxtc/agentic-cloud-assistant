@@ -10,9 +10,9 @@ Default: single operator, Docker Compose, one configured AWS account.
 - [x] 4. Share verified STS account identity and credentials across all workflows; bind executions and caches to account and region.
 - [x] 5. Return complete/partial/failed scan coverage; prevent false-clean claims; preserve security-group port ranges and sources.
 - [x] 6. Enforce transactional execution transitions, saved-plan approvals, idempotency, reviewed direct changes and separately approved destroy plans.
-- [x] 7. Isolate Terraform in a non-root worker; enforce provider/HCL policy; retain lockfiles; validate paths; align Terraform and S3 locking versions. Implementation complete; container build/smoke acceptance pending.
-- [x] 8. Persist background jobs and real progress; handle interruptions without blindly retrying mutations. Core implementation complete locally; ambiguous outcomes remain locked for validated offline recovery.
-- [ ] 9. Correct filtered RAG retrieval and document replacement; evaluate retrieval; correct health scoring and cost periods.
+- [x] 7. Isolate Terraform in a non-root worker; enforce provider/HCL policy; retain lockfiles; validate paths; align Terraform and S3 locking versions. Implementation and published Step 7 CI image/isolation smoke acceptance complete.
+- [x] 8. Persist background jobs and real progress; handle interruptions without blindly retrying mutations. Core implementation published; ambiguous outcomes remain locked for validated offline recovery.
+- [x] 9. Correct filtered RAG retrieval and document replacement; evaluate retrieval; correct health scoring and cost periods. Implemented locally; see the validation and unrelated Ollama-test caveat below.
 - [ ] 10. Update integration tests, exercise mocked end-to-end workflow, redact logs, document setup/backups/recovery; verify real changes only in a sandbox account.
 
 ## Acceptance
@@ -528,3 +528,32 @@ Step 8 changes were committed as `4df1cc6` and pushed to GitHub `main` on
 4 November 2026. Full Compose restart/browser
 and live AWS acceptance are not performed. See status.md for latest verification.
 Next is Step 9; explain its plan and obtain approval before starting it.
+
+## Step 9 — retrieval, scoped scoring and billing periods — 4 November 2026
+
+Implemented at the user's request. Query-time resource predicates now constrain
+Chroma's candidate set, including canonical/legacy UI labels. Same-ID document
+updates use process/filesystem locking and a durable rollback journal, with stale
+tail removal, exact-identity deletion and fail-closed interruption recovery.
+Class imports no longer open a real knowledge database; encoder imports are lazy.
+
+Added a repeatable temporary-database retrieval evaluation and a curated seven-query
+regression corpus. Deterministic and real MiniLM ONNX CPU runs returned hit@1,
+recall@3 and MRR 1.0, negative accuracy 1.0 and zero resource-filter leakage. This
+small corpus is a baseline, not broad production/model quality certification.
+Actual pinned Chroma tests cover filters, replacement/restart and cross-process reads.
+
+Scoring now lives in the backend, weights applicable fully observed rule families
+once and excludes empty scope; unknown/incomplete/legacy cases receive no score.
+Billing preserves explicit unknown/zero/currency/estimated states, completes all
+pages, separates UTC month-to-date from completed-month history and only compares
+contiguous completed months. UI, tool/resource and chat contracts agree. Failed
+model summaries retain billing results; unavailable data never implies zero spend.
+
+Verification: 332 unaffected backend cases passed with two optional real-Chroma
+checks skipped in the minimal environment; all 19 knowledge tests passed separately
+with pinned Chroma. Frontend tests/lint/build, source compilation and dependency
+checks passed. An unrelated concurrent Ollama-test edit causes a syntax error in
+default discovery and was preserved pending the user's preference; see status.md.
+No live cloud/billing/LLM calls, deployment or existing operator data migration.
+Changes are local/uncommitted/unpushed. Next is Step 10 after explanation/approval.

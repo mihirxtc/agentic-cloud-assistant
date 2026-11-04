@@ -45,6 +45,8 @@ def assessment(scan):
         if scan.get("scan_id"):
             finding["scan_id"] = scan["scan_id"]
             finding["aws_identity"] = scan.get("aws_identity")
+    from services.health_score import health_score
+    score = health_score(coverage, findings)
     counts = {level: sum(f["severity"] == level for f in findings) for level in ("HIGH", "MEDIUM", "LOW")}
     errors = {name: service["errors"] for name, service in coverage["services"].items() if service["status"] != "complete"}
     if coverage["status"] != "complete":
@@ -54,7 +56,7 @@ def assessment(scan):
     else:
         summary = "No findings in the completed built-in checks. This limited assessment does not establish that the AWS account is secure."
     return {"status": coverage["status"], "coverage": coverage, "findings": findings,
-            "total_findings": len(findings), "severity_counts": counts, "errors": errors,
+            "total_findings": len(findings), "severity_counts": counts, "health_score": score, "errors": errors,
             "scan_id": scan.get("scan_id"), "aws_identity": scan.get("aws_identity"),
             "started_at": scan.get("started_at"), "completed_at": scan.get("completed_at") or datetime.now(timezone.utc).isoformat(),
             "llm_summary": summary}
@@ -107,5 +109,7 @@ def rule_coverage(scan, services):
                    for item in items if isinstance(item, dict) and not known(item)]
         state = services[service]["status"]
         result[rule] = {"status": "partial" if unknown and state != "failed" else state,
-                        "unknown_resources": unknown}
+                        "unknown_resources": unknown,
+                        "evaluated_count": sum(isinstance(item, dict) and known(item) for item in items) if state != "failed" else 0,
+                        "observed_count": len(items)}
     return result

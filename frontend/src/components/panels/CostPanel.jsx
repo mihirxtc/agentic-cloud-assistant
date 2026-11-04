@@ -1,17 +1,15 @@
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { CHART_COLORS } from '../../utils/constants'
+import { costView } from '../../utils/cost'
 import DarkTooltip from '../ui/DarkTooltip'
 
 export default function CostPanel({ data, loading, onLoad }) {
-  const current  = data?.current_month?.amount  ?? 0
-  const currency = data?.current_month?.currency ?? 'USD'
-  const period   = data?.current_month?.period   ?? ''
-  const trend    = data?.monthly_trend           ?? []
-  const services = data?.by_service              ?? []
-  const previous = trend.length >= 2 ? trend[trend.length - 2].amount : current
-  const delta    = previous > 0 ? ((current - previous) / previous) * 100 : 0
-  const deltaUp  = delta > 0
-  const maxSvc   = services.length > 0 ? Math.max(...services.map((s) => s.amount)) : 1
+  const { amount: current, currency, percentage: delta, comparisonLabel } = costView(data)
+  const period = data?.current_month?.period || ''
+  const trend = data?.monthly_trend || []
+  const services = data?.by_service || []
+  const deltaUp = delta != null && delta > 0
+  const maxSvc   = services.length > 0 ? Math.max(1, ...services.map((s) => Math.abs(s.amount))) : 1
 
   return (
     <section className="aca-panel" style={{ gridColumn: 'span 7' }}>
@@ -22,22 +20,22 @@ export default function CostPanel({ data, loading, onLoad }) {
         </button>
       </div>
       <div className="aca-panel-body">
-        {!data && !loading && <div className="aca-empty">Load to view month-over-month spend</div>}
+        {!data && !loading && <div className="aca-empty">Load to view month-to-date spend and completed-month comparisons</div>}
         {loading && <div className="aca-skel" style={{ height: 340 }} />}
         {data && !loading && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div className="aca-tile">
                 <div className="aca-tile-value mono" style={{ color: 'var(--accent-blue)' }}>
-                  ${current.toFixed(2)}
+                  {current == null ? 'Unavailable' : current.toFixed(2)}
                 </div>
-                <div className="aca-tile-label">{currency} · {period}</div>
+                <div className="aca-tile-label">Month to date · {currency} · {period}{data.current_month?.estimated && ' · Estimated'}</div>
               </div>
               <div className="aca-tile">
-                <div className="aca-tile-value mono" style={{ color: deltaUp ? 'var(--error)' : 'var(--success)' }}>
-                  {deltaUp ? '↑' : '↓'} {Math.abs(delta).toFixed(1)}%
+                <div className="aca-tile-value mono" style={{ color: delta == null ? 'var(--text-muted)' : deltaUp ? 'var(--error)' : 'var(--success)' }}>
+                  {delta == null ? 'Unavailable' : `${deltaUp ? '↑' : delta < 0 ? '↓' : '→'} ${Math.abs(delta).toFixed(1)}%`}
                 </div>
-                <div className="aca-tile-label">Month over month</div>
+                <div className="aca-tile-label">{comparisonLabel} · completed months{data.comparison?.estimated && ' · Estimated'}</div>
               </div>
             </div>
 
@@ -48,12 +46,15 @@ export default function CostPanel({ data, loading, onLoad }) {
               }}>
                 <span style={{ color: 'var(--warning)', fontSize: 14 }}>⚠</span>
                 <div style={{ color: 'var(--warning)', fontSize: 12, lineHeight: 1.5 }}>
-                  <strong style={{ fontWeight: 600 }}>{data.anomaly.service} anomaly detected.</strong>{' '}
-                  {data.anomaly.note}
+                  <strong style={{ fontWeight: 600 }}>Completed-month spend increase.</strong>{' '}
+                  {data.anomaly.message}
                 </div>
               </div>
             )}
 
+            {Object.entries(data.errors || {}).map(([part, message]) => <p key={part} role="status">{part.replaceAll('_', ' ')}: {message}</p>)}
+            {delta == null && <p role="status">{data.comparison?.message || 'No comparable completed-month data.'}</p>}
+            <div className="aca-panel-title">Completed calendar months · {trend[0]?.currency || 'currency unavailable'}</div>
             <div style={{ height: 180 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -68,8 +69,8 @@ export default function CostPanel({ data, loading, onLoad }) {
                     axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
                   <YAxis tick={{ fill: 'var(--text-secondary)', fontSize: 11 }}
                     axisLine={{ stroke: 'var(--border)' }} tickLine={false}
-                    tickFormatter={(v) => '$' + v} width={52} />
-                  <Tooltip content={<DarkTooltip prefix="$" />} />
+                    tickFormatter={(v) => String(v)} width={52} />
+                  <Tooltip content={<DarkTooltip />} />
                   <Area type="monotone" dataKey="amount"
                     stroke={CHART_COLORS.blue} strokeWidth={2} fill="url(#costFill)" />
                 </AreaChart>
@@ -77,12 +78,12 @@ export default function CostPanel({ data, loading, onLoad }) {
             </div>
 
             <div>
-              <div className="aca-panel-title" style={{ marginBottom: 8 }}>Top services</div>
+              <div className="aca-panel-title" style={{ marginBottom: 8 }}>Top services · month to date</div>
               {services.map((s) => (
                 <div key={s.service} className="aca-bar-row">
                   <div className="name">{s.service}</div>
-                  <div className="track"><div className="fill" style={{ width: (s.amount / maxSvc) * 100 + '%' }} /></div>
-                  <div className="amount mono">${s.amount.toFixed(2)}</div>
+                  <div className="track"><div className="fill" style={{ width: Math.abs(s.amount) / maxSvc * 100 + '%', background: s.amount < 0 ? 'var(--success)' : undefined }} /></div>
+                  <div className="amount mono">{s.amount.toFixed(2)} {s.currency}</div>
                 </div>
               ))}
             </div>

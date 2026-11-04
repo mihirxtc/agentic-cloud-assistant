@@ -25,8 +25,8 @@ export default function Topbar({ securityScore, onOpenSettings, onLogout, region
       </div>
       <div className="aca-row" style={{ gap: 8 }}>
         {securityScore != null && (
-          <span className={'aca-badge ' + scoreClass} style={{ padding: '4px 8px', fontSize: 10 }}>
-            SEC {securityScore}
+          <span title="Weighted applicable built-in check families passing. Repeated findings count once per family; this is not an account-wide security rating." className={'aca-badge ' + scoreClass} style={{ padding: '4px 8px', fontSize: 10 }}>
+            CHECKS {securityScore}%
           </span>
         )}
         <button className="aca-btn-ghost small" onClick={onOpenSettings}>{awsIdentity?.account_id ?? 'AWS unverified'} · {region}</button>

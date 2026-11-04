@@ -1,0 +1,19 @@
+{
+  "documents": [
+    {"doc_id": "s3-block", "resource_type": "s3", "text": "s3 public access block bucket policy prevent exposure"},
+    {"doc_id": "iam-mfa", "resource_type": "iam", "text": "iam mfa multifactor authentication console password"},
+    {"doc_id": "ssh-ingress", "resource_type": "ec2", "text": "ssh ingress security group restrict ports sources"},
+    {"doc_id": "default-vpc", "resource_type": "vpc", "text": "vpc default subnet network migration"},
+    {"doc_id": "terraform-review", "resource_type": "terraform", "text": "terraform saved plan approval provider"},
+    {"doc_id": "wrong-resource-distractor", "resource_type": "general", "text": "s3 public access block s3 public access block"}
+  ],
+  "queries": [
+    {"query": "s3 public access block", "resource_filter": "s3", "expected_sources": ["s3-block"]},
+    {"query": "iam mfa multifactor", "resource_filter": "iam", "expected_sources": ["iam-mfa"]},
+    {"query": "ssh ingress security group", "resource_filter": "ec2", "expected_sources": ["ssh-ingress"]},
+    {"query": "vpc default subnet", "resource_filter": "vpc", "expected_sources": ["default-vpc"]},
+    {"query": "terraform saved plan approval", "resource_filter": "terraform", "expected_sources": ["terraform-review"]},
+    {"query": "kubernetes pods cluster", "resource_filter": "s3", "expected_sources": []},
+    {"query": "s3 public access block", "resource_filter": "rds", "expected_sources": []}
+  ]
+}

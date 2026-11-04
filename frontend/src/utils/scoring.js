@@ -1,7 +1,10 @@
-import { RULE_WEIGHTS, RULE_TOTAL } from './constants'
+import { isAssessmentComplete } from './assessment.js'
 
-export function computeHealthScore(findings) {
-  let failing = 0
-  findings.forEach((f) => { failing += RULE_WEIGHTS[f.rule] || 0 })
-  return Math.round((Math.max(0, RULE_TOTAL - failing) / RULE_TOTAL) * 100)
+// The backend owns the method/weights and counts only applicable check families.
+export function computeHealthScore(assessment) {
+  if (!isAssessmentComplete(assessment)) return null
+  const score = assessment.health_score
+  return score?.method === 'weighted_applicable_rule_families_v1'
+    && Number.isFinite(score.value) && score.value >= 0 && score.value <= 100
+    ? score.value : null
 }

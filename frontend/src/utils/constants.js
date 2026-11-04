@@ -6,18 +6,6 @@ export const CHART_COLORS = {
   muted:   '#555',
 }
 
-export const RULE_WEIGHTS = {
-  SSH_PORT_OPEN:            3,
-  RDP_PORT_OPEN:            3,
-  S3_BUCKET_PUBLIC:         3,
-  UNRESTRICTED_ALL_TRAFFIC: 3,
-  IAM_USER_NO_MFA:          2,
-  IAM_USER_INACTIVE:        1,
-  DEFAULT_VPC_IN_USE:       1,
-}
-
-export const RULE_TOTAL = 16
-
 export const QUICK_REQUESTS = [
   'EC2 t3.micro + security group',
   'S3 bucket with versioning',

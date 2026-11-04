@@ -48,7 +48,9 @@ python -m pip check
 
 The default suite tests security rules, mocked Ollama interactions, SQLite
 migration/recovery/concurrency, and real HTTP/MCP routing with a stubbed knowledge
-base. It makes no AWS or model-service calls. RAG functional tests use the live knowledge-base
+base. It also tests filtered retrieval, replacement rollback, scoring and billing periods
+without an embedding download. Optional pinned-Chroma acceptance tests skip when
+Chroma is not installed. It makes no AWS or model-service calls. Legacy RAG functional tests use the live knowledge-base
 singleton and embedding model; the existing RAG HTTP tests target obsolete
 routes. They are excluded from default discovery pending the planned RAG test
 update. Do not run these suites against production data.
@@ -642,3 +644,88 @@ adopted for execution. Restarted queued jobs run only through the configured wor
 Compose grants the worker ten minutes for graceful shutdown; forced termination
 uses the interrupted-job recovery behavior above. Local process/container restart
 and live AWS acceptance still need deployment-level validation.
+
+
+## Retrieval, check scores and billing periods (Step 9)
+
+Knowledge queries apply the resource predicate inside Chroma **before** selecting
+nearest neighbours. New metadata stores canonical lowercase resource types; reads
+also accept the legacy UI labels such as `S3`, `IAM` and `Terraform`. Source order
+follows retrieval order. The relevance threshold remains 0.3, with full-precision
+cosine distance used for thresholding rather than rounded display scores.
+
+Replacing a document with the same ID removes stale tail chunks and old metadata.
+Embeddings are prepared before any vector-store change. Every application read,
+write, delete and count shares a filesystem lock; a durable private
+`.aca-replacement.json` snapshot journal is written before vector changes. A failed
+or interrupted update restores the previous document before the next application
+read. If restoration fails, accesses fail instead of exposing a mixed revision.
+Blank replacement text is rejected; use explicit deletion. Deletion matches the
+exact `doc_id` metadata rather than matching other documents by ID prefix.
+
+This guarantee applies through `SecurityKnowledgeBase`, including API/worker
+processes sharing the same local storage and lock. Direct collection access or an
+older application version bypasses that boundary. Stop all writers before upgrading;
+keep the lock/journal files with the Chroma backup and do not manually remove an
+outstanding journal to force access. A response lost after a successful update may
+require the operator to inspect/retry the document; this is not cross-store
+transactional infrastructure execution. Pinned Chroma 1.5.7 acceptance tests cover
+its actual API, restart rollback and visibility between processes.
+
+The default offline suite includes deterministic retrieval fixtures. A separate
+isolated evaluation uses a temporary database and never opens the operator's KB:
+
+```bash
+cd backend
+# Requires the project's pinned chromadb dependency; no embedding download.
+python -m rag.evaluate --output /tmp/aca-retrieval-fixture.json
+# Real embedding evaluation with an existing local SentenceTransformer model:
+python -m rag.evaluate --embedding-model /path/to/local/model --output /tmp/aca-retrieval-semantic.json
+# Optional alternate CPU ONNX runtime for the same MiniLM model family.
+# Explicitly downloads its checksum-verified model to this temporary cache if absent:
+python -m rag.evaluate --onnx-cache /tmp/aca-minilm-onnx --output /tmp/aca-retrieval-onnx.json
+# Actual vector-store acceptance without embedding downloads:
+python -m pytest tests/test_knowledge.py
+```
+
+The checked-in corpus has five positive and two negative queries, including a
+wrong-resource distractor. Local fixture and MiniLM ONNX runs both produced
+hit@1/recall@3/MRR 1.0, negative accuracy 1.0 and zero filter violations. This is a
+small regression baseline, not a broad benchmark, answer-grounding evaluation,
+or proof that the production SentenceTransformer runtime performs identically.
+Expand the corpus using representative operator queries before tuning thresholds.
+
+Security assessments now return `health_score`, with the method
+`weighted_applicable_rule_families_v1`. Each applicable, fully inspected built-in
+rule family has one weight (SSH/RDP/S3/all-traffic 3 each; MFA 2; inactivity/default
+VPC 1 each). A family fails if it has any confirmed finding; repeated affected
+resources do not subtract the same weight repeatedly. Families without observed
+resources are excluded from the denominator. Incomplete coverage, unknown checks,
+unknown finding rules and an entirely empty scope produce `value: null`.
+The dashboard uses the backend result and labels it **CHECKS**, with its limited
+scope explained in the tooltip. This percentage does not rate account-wide security.
+Existing saved assessments lacking this method do not receive a fabricated score;
+run a new assessment to obtain one.
+
+Billing reports separate **month to date** from **completed calendar months**.
+UTC dates define the window; the end date is exclusive. On the first day there
+are no completed days in the new month, so current-month cost is unavailable and
+no future-ended API request is made. The percentage/anomaly compares the two latest
+contiguous completed calendar months in the same currency. The frontend uses that
+backend comparison, never a partial month divided by a full month.
+`estimate_costs.time_period_days` remains a compatibility input for an approximate
+calendar history horizon (rounded up, at least two and at most twelve months),
+not an exact rolling-day invoice window.
+
+Every Cost Explorer page must succeed before publishing an aggregate. Missing
+results, invalid/incomplete months, incompatible currencies and API errors remain
+unknown; an explicit successfully returned zero remains zero. Zero/negative
+baselines do not yield percentage claims. Values preserve currency and estimated
+flags; service credits remain visible. `comparison` carries periods and the signed
+percentage; `anomaly` retains the same object for compatibility. Coverage/errors
+travel with tools, chat context and the cost resource. Model failure retains the
+report, and incomplete billing data is not sent to a model for a fabricated summary.
+
+API semantics: [Chroma collection query/filter interface](https://github.com/chroma-core/chroma/blob/main/chromadb/api/models/Collection.py)
+and [AWS GetCostAndUsage](https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_GetCostAndUsage.html).
+No live billing request or cloud mutation was made during these tests.

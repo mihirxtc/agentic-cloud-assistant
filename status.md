@@ -4,7 +4,8 @@ Updated: **4 November 2026** (Europe/London).
 
 ## Current position
 
-**Improvement steps 1–8 are implemented. Step 9 has not started.**
+**Improvement steps 1–9 are implemented. Step 10 has not started.**
+Step 9 changes are local, uncommitted and unpushed.
 Step 8 was implemented after user approval, committed as `4df1cc6` and pushed
 to GitHub `main` on 4 November 2026.
 Steps 1–7 are published on GitHub `main`: implementation commit `26a2522`, followed
@@ -39,6 +40,8 @@ volume migration or infrastructure execution was performed during this work.
    durable one-shot dispatch ledger, token bootstrap and operational migration docs.
 8. Persistent background jobs, a separate worker, stage progress and restart
    handling, authenticated status/cancellation, and evidence-bound reconciliation.
+9. Prefiltered retrieval, recoverable document replacement, repeatable retrieval
+   evaluation, applicable-check scoring, and completed-month cost comparisons.
 
 ## Step 8 behavior
 
@@ -130,15 +133,50 @@ runner ledger and workspace/state volumes. Preserve old root-owned/legacy data;
 no actual volume ownership change or migration was performed. Do not delete volumes
 or clear locks/runner ledger entries to force a retry.
 
+## Step 9 — current local changes and validation
+
+- Resource filters run before nearest-neighbour selection. Canonical lowercase
+  metadata and legacy UI labels agree; source order is stable.
+- Same-ID document replacement removes stale tails and metadata. Cross-process
+  file locking and a durable snapshot journal restore previous content after
+  interruption before application readers proceed. Empty replacements fail;
+  deletion uses exact document metadata identity. Failed recovery blocks reads.
+- Repeatable evaluation runs against a temporary KB. A seven-query curated fixture
+  and a local MiniLM ONNX evaluation both returned hit@1/recall@3/MRR 1.0, negative
+  accuracy 1.0 and zero filter violations. This is a small regression corpus, not
+  proof of production retrieval quality or SentenceTransformer runtime equivalence.
+- Backend health_score weights each applicable rule family once. Duplicate findings
+  do not multiply penalties; missing coverage/unknown rules/empty scope get no score.
+  The UI labels the scoped result CHECKS and hides legacy unsupported scores.
+- UTC month-to-date spend is separate from the last two completed-month comparison.
+  Pagination, currencies, estimation flags, first-of-month handling, missing data,
+  zero/negative baselines and model-summary failure have explicit semantics.
+  Billing API failures never become zero spend or a false percentage decrease.
+
+Validation: **332 backend tests passed, 2 optional Chroma tests skipped** in the
+minimal offline environment, excluding the independently edited Ollama test file.
+**All 19 knowledge tests passed** in a separate environment using pinned Chroma
+1.5.7, including the two real-store acceptance tests and cross-process visibility.
+Frontend tests/lint/build, Python source compilation and dependency checks passed.
+No live AWS/billing/LLM call, deployment or existing-data migration was performed.
+A checksum-verified MiniLM ONNX model was downloaded only to a temporary evaluation
+cache, and its local evaluation used a temporary test database. Existing model/data
+and obsolete RAG HTTP suites remain excluded. Bundle warning is approximately 667 kB.
+
+**Unrelated concurrent edit:** backend/tests/test_ollama_status.py acquired a stray
+`w` before its opening docstring and a changed unsupported-model fixture during
+Step 9. These edits were preserved, and the user was asked whether to repair them.
+The stray character prevents the default suite from collecting; no full-green
+suite is claimed. Do not silently stage these unrelated changes with Step 9.
+
 ## Remaining work and continuation
 
-9. Repair filtered RAG retrieval/document replacement; evaluate retrieval; correct
-   health scoring and cost comparison periods.
 10. Broaden integration/end-to-end coverage, redaction/logging, operational recovery
     and controlled sandbox-account deployment validation.
 
-Step 8 changes and checkpoint were committed as `4df1cc6` and pushed to `main`. Pre-existing
-PROJECT-ANALYSIS.md and project-handoff/ remain local and untracked.
-Explain Step 9's current code/proposed changes/benefit and obtain approval before
-implementation. **Do not start Step 9 automatically.** Implementation approval
-is not permission for deployment or live infrastructure changes.
+Steps 1–8 are published (Step 8 implementation `4df1cc6`, publication `b361432`).
+Step 9 changes and this checkpoint are local and have not been committed/pushed.
+Pre-existing PROJECT-ANALYSIS.md and project-handoff/ remain local and untracked.
+Explain Step 10's changes and benefit before implementing it; obtain approval.
+**Do not start Step 10 automatically.** No deployment or live AWS change is
+implicitly authorized by this checkpoint.

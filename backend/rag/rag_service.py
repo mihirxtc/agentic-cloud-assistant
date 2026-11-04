@@ -1,6 +1,5 @@
 import logging
 from typing import Optional
-from rag.knowledge_base import knowledge_base
 
 logger = logging.getLogger(__name__)
 
@@ -44,19 +43,18 @@ and clearly indicate which parts come from the retrieved documents."""
 def query_knowledge_base(
     query: str,
     n_results: int = 3,
-    resource_filter: Optional[str] = None
+    resource_filter: Optional[str] = None,
+    *, knowledge=None
 ) -> dict:
-    raw_chunks = knowledge_base.search(query, n_results=n_results)
+    if knowledge is None:
+        from rag.knowledge_base import knowledge_base
+        knowledge = knowledge_base
+    raw_chunks = knowledge.search(query, n_results=n_results, resource_filter=resource_filter)
     relevant_chunks = [
         c for c in raw_chunks
         if c["relevance_score"] >= RELEVANCE_THRESHOLD
     ]
-    if resource_filter:
-        relevant_chunks = [
-            c for c in relevant_chunks
-            if c["metadata"].get("resource_type") == resource_filter
-        ]
-    sources = list(set(
+    sources = list(dict.fromkeys(
         c["metadata"].get("doc_id", "unknown")
         for c in relevant_chunks
     ))
