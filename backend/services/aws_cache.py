@@ -7,13 +7,17 @@ _lock = RLock()
 
 
 def cached_context(connection, build):
+    from services.storage import get_execution_store
+    key = (*connection.cache_key, get_execution_store().cache_revision(connection.partition, connection.account_id))
     with _lock:
-        if connection.cache_key not in _cache:
-            _cache[connection.cache_key] = build()
-        return _cache[connection.cache_key]
+        if key not in _cache:
+            _cache[key] = build()
+        return _cache[key]
 
 
 def invalidate_account(connection):
+    from services.storage import get_execution_store
+    get_execution_store().invalidate_cache(connection.partition, connection.account_id)
     # IAM/S3 changes can affect every regional view of this account.
     with _lock:
         for key in list(_cache):

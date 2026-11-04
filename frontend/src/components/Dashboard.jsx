@@ -5,6 +5,7 @@ import { isAssessmentComplete } from '../utils/assessment'
 import { computeHealthScore } from '../utils/scoring'
 import { callTool } from '../api/mcpClient'
 import toast from 'react-hot-toast'
+import JobsPanel from './panels/JobsPanel'
 import Topbar                from './ui/Topbar'
 import InfrastructurePanel   from './panels/InfrastructurePanel'
 import SecurityPanel         from './panels/SecurityPanel'
@@ -143,6 +144,7 @@ export default function Dashboard({ onOpenSettings }) {
           onApplyComplete={onInfraChanged}
         />
         </fieldset>
+        <JobsPanel />
         <ExecutionHistoryPanel />
         <KnowledgeBasePanel />
       </div>

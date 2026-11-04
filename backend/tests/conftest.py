@@ -46,5 +46,10 @@ def environment(tmp_path, monkeypatch):
     fake_runner = FakeRunner(tmp_path / "workdirs")
     store.test_runner = fake_runner
     monkeypatch.setattr(runner_client.RunnerClient, "request", lambda self, body: fake_runner.request(body))
+    # Existing service regressions execute within worker context; queue integration
+    # tests replace this with the production default to exercise submission.
+    from contextvars import ContextVar
+    import services.jobs as jobs
+    monkeypatch.setattr(jobs, 'active_job', ContextVar('test_worker', default=lambda *_: None))
     import http_app
     return mcp_server, http_app, store, knowledge_base

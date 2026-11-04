@@ -640,3 +640,31 @@ def test_old_engine_cannot_fall_back_to_a_full_volume_mount(broker_env):
     with pytest.raises(ValueError, match='26 or newer'):
         broker.handle(request())
     launch.assert_not_called()
+
+
+def test_durable_outcome_inspection_never_launches_or_replays(broker_env):
+    broker, launch, _ = broker_env
+    broker.handle(request())
+    hashes = broker.handle(request('manifest'))['manifest']
+    applied = broker.handle(request('apply', expected_manifest=hashes))
+    assert applied['success']
+    launch.reset_mock()
+    outcome = broker.handle(request('outcome', plan_file='tfplan'))
+    assert outcome['dispatched'] is True
+    assert outcome['outcome']['status'] == 'complete'
+    assert outcome['outcome']['result']['success'] is True
+    launch.assert_not_called()
+    with pytest.raises(ValueError, match='already dispatched'):
+        broker.handle(request('apply', expected_manifest=hashes))
+    launch.assert_not_called()
+
+
+def test_interrupted_runner_persists_uncertain_evidence(broker_env):
+    broker, launch, _ = broker_env
+    broker.handle(request())
+    hashes = broker.handle(request('manifest'))['manifest']
+    launch.side_effect = TimeoutError('private timeout')
+    assert broker.handle(request('apply', expected_manifest=hashes))['uncertain']
+    outcome = broker.handle(request('outcome', plan_file='tfplan'))
+    assert outcome['outcome']['status'] == 'uncertain'
+    assert 'private timeout' not in json.dumps(outcome)

@@ -54,9 +54,9 @@ class ExecutionStore:
             with self._connection() as connection:
                 os.chmod(self.path, 0o600)
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4):
+                if version not in (0, 1, 2, 3, 4, 5):
                     raise RuntimeError("Unsupported application database schema")
-                if version in (1, 2, 3):
+                if version in (1, 2, 3, 4):
                     backups = self.data_dir / "backups"
                     backups.mkdir(exist_ok=True, mode=0o700)
                     backup = backups / f"schema-v{version}-{uuid.uuid4().hex}.sqlite3"
@@ -87,7 +87,27 @@ class ExecutionStore:
                 connection.execute("CREATE TABLE IF NOT EXISTS action_requests (request_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, execution_id TEXT NOT NULL)")
                 connection.execute("CREATE TABLE IF NOT EXISTS action_locks (lock_key TEXT PRIMARY KEY, execution_id TEXT NOT NULL)")
                 connection.execute("CREATE TABLE IF NOT EXISTS action_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, execution_id TEXT NOT NULL, payload TEXT NOT NULL)")
-                connection.execute("PRAGMA user_version = 4")
+                connection.execute("CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, status TEXT NOT NULL, owner TEXT, lease_until REAL, payload TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS job_requests (request_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, job_id TEXT NOT NULL)")
+                connection.execute("CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, lease_until)")
+                if version in (1, 2, 3, 4):
+                    import time
+                    for (payload,) in connection.execute('SELECT payload FROM executions').fetchall():
+                        entry = json.loads(payload)
+                        if entry.get('status') not in ('planning', 'applying', 'uncertain', 'failed') or entry.get('job_id'):
+                            continue
+                        job_id = 'job_' + uuid.uuid4().hex
+                        mutation = entry['status'] != 'planning'
+                        job = {'job_id': job_id, 'operation': '_legacy_action', 'status': 'reconciliation_required' if mutation else 'interrupted',
+                               'stage': 'Legacy operation requires review', 'created_at': time.time(), 'updated_at': time.time(),
+                               'execution_id': entry['execution_id'], 'aws_identity': entry.get('aws_identity'), 'events': [],
+                               'error': 'Imported history is never automatically dispatched; inspect original worker and AWS state.'}
+                        connection.execute('INSERT INTO jobs VALUES (?, ?, NULL, NULL, ?)', (job_id, job['status'], json.dumps(job)))
+                        entry['job_id'] = job_id
+                        if entry['status'] == 'applying':
+                            entry['status'] = 'uncertain'
+                        connection.execute('UPDATE executions SET payload=? WHERE execution_id=?', (json.dumps(entry), entry['execution_id']))
+                connection.execute("PRAGMA user_version = 5")
                 if not connection.execute(
                     "SELECT 1 FROM metadata WHERE key = 'legacy_history_imported'"
                 ).fetchone():
@@ -223,7 +243,7 @@ class ExecutionStore:
             connection.commit()
         return entry
 
-    def claim_action(self, execution_id, approved, digest, request_key, request_hash):
+    def claim_action(self, execution_id, approved, digest, request_key, request_hash, job=None):
         self.initialize()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -243,6 +263,14 @@ class ExecutionStore:
                 raise ValueError("Approval must match the reviewed digest; legacy actions require a new proposal")
             if approved:
                 self._lock_action(connection, entry)
+                identity = entry['aws_identity']
+                connection.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?)",
+                                   (f"cache_revision:{identity['partition']}:{identity['account_id']}", uuid.uuid4().hex))
+            if job is not None:
+                from services.jobs import Jobs
+                job['execution_id'] = execution_id
+                Jobs.insert(connection, job)
+                entry['job_id'] = job['job_id']
             entry.update(status="applying" if approved else "rejected", decision_key=request_key,
                          approved_at=datetime.now(timezone.utc).isoformat() if approved else None)
             connection.execute("INSERT INTO action_requests VALUES (?, ?, ?)", (request_key, request_hash, execution_id))
@@ -275,6 +303,18 @@ class ExecutionStore:
         with self._connection() as connection:
             return [json.loads(row[0]) for row in connection.execute(
                 "SELECT payload FROM action_events WHERE execution_id = ? ORDER BY sequence", (execution_id,))]
+
+    def cache_revision(self, partition, account_id):
+        self.initialize()
+        with self._connection() as connection:
+            row = connection.execute("SELECT value FROM metadata WHERE key=?", (f"cache_revision:{partition}:{account_id}",)).fetchone()
+        return row[0] if row else ''
+
+    def invalidate_cache(self, partition, account_id):
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?)", (f"cache_revision:{partition}:{account_id}", uuid.uuid4().hex))
+            connection.commit()
 
     def history(self) -> list:
         self.initialize()

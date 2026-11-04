@@ -6,6 +6,7 @@ const regionParameters = {
   run_security_analysis_with_summary: 'region', estimate_costs: 'region', get_cost_with_summary: 'region',
   generate_terraform_hcl: 'region', generate_terraform_from_request: 'aws_region',
   run_terraform_plan_mcp: 'aws_region', run_terraform_apply_mcp: 'aws_region', aws_chat: 'region',
+  inspect_interrupted_action: 'aws_region', reconcile_action: 'aws_region',
   agent_run: 'region', agent_approve: 'aws_region', revoke_open_ingress_rule: 'region', rollback_execution: 'aws_region',
 }
 let state = { identity: null, region: null, loading: false, error: null }

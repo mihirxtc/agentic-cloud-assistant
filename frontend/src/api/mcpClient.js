@@ -1,4 +1,5 @@
 import { authFetch } from './session'
+import { waitForJob } from './jobs'
 import { withAwsIdentity } from './awsIdentity'
 
 const MCP_ENDPOINT = (import.meta.env.VITE_MCP_URL ?? '/mcp/').replace(/\/?$/, '/')
@@ -132,6 +133,8 @@ class MCPClient {
 
 const mcpClient = new MCPClient(MCP_ENDPOINT)
 
-export function callTool(name, args = {}) {
-  return mcpClient.callTool(name, withAwsIdentity(name, args))
+export async function callTool(name, args = {}, options = {}) {
+  const result = await mcpClient.callTool(name, withAwsIdentity(name, args))
+  return result?.job_id && ['queued', 'running', 'interrupted', 'reconciliation_required', 'cancelled', 'complete'].includes(result.status)
+    ? waitForJob(result, options) : result
 }

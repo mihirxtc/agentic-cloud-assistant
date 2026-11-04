@@ -271,7 +271,7 @@ def test_schema_three_upgrade_backs_up_and_preserves_sessions(action_env):
         assert db.execute('PRAGMA user_version').fetchone()[0] == 3
         assert db.execute('SELECT token_hash FROM sessions').fetchone()[0] == 'token'
     with sqlite3.connect(reopened.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
         assert db.execute('SELECT token_hash FROM sessions').fetchone()[0] == 'token'
 
 

@@ -2,9 +2,8 @@ import ActionReview from '../ui/ActionReview'
 import { decisionArgs, actionMessage } from '../../utils/approval'
 import ScanCoverage from '../ui/ScanCoverage'
 import { verificationMessage } from '../../utils/assessment'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { callTool } from '../../api/mcpClient'
-import { AGENT_STEPS } from '../../utils/constants'
 
 function PhasePill({ phase }) {
   const map = {
@@ -24,33 +23,11 @@ function PhasePill({ phase }) {
   return <span className={'aca-badge ' + cls}>{label}</span>
 }
 
-function AgentPhaseSteps({ step, done = false }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {AGENT_STEPS.map((s, i) => {
-        const state = done || i < step ? 'past' : i === step ? 'current' : 'future'
-        const sym   = state === 'past' ? '✓' : state === 'current' ? '›' : '○'
-        const color = state === 'past' ? 'var(--success)' : state === 'current' ? 'var(--accent-blue)' : 'var(--text-muted)'
-        return (
-          <div key={i} style={{
-            display: 'flex', gap: 10, color,
-            fontSize: 12, opacity: state === 'future' ? 0.55 : 1,
-            transition: 'opacity 0.3s ease, color 0.3s ease',
-          }}>
-            <span className="mono" style={{ width: 14, textAlign: 'center' }}>{sym}</span>
-            <span style={{ color: state === 'future' ? 'var(--text-muted)' : 'var(--text-primary)' }}>{s}</span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
   const [destroyProposal, setDestroyProposal] = useState(null)
   const [decisionKey] = useState(() => crypto.randomUUID())
   const [phase,        setPhase]        = useState('idle')
-  const [step,         setStep]         = useState(0)
+  const [stage,        setStage]        = useState('Queued')
   const [data,         setData]         = useState(null)
   const [result,       setResult]       = useState(null)
   const [showHcl,      setShowHcl]      = useState(false)
@@ -62,18 +39,12 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
   const [rollbackDone, setRollbackDone] = useState(false)
   const [resolved,     setResolved]     = useState(false)
 
-  useEffect(() => {
-    if (phase !== 'thinking' && phase !== 'applying') return
-    const id = setInterval(() => setStep((s) => Math.min(s + 1, AGENT_STEPS.length - 1)), 1200)
-    return () => clearInterval(id)
-  }, [phase])
-
   const run = async () => {
-    setPhase('thinking'); setStep(0); setData(null); setResult(null); setError(null)
+    setPhase('thinking'); setStage('Queued'); setData(null); setResult(null); setError(null)
     try {
       const r = await callTool('agent_run', {
         region, model,
-      })
+      }, { onJob: (job) => setStage(job.stage) })
       setData(r)
       if (r.status === 'awaiting_approval') setPhase('awaiting_approval')
       else if (['partial', 'failed', 'no_issues'].includes(r.status)) setPhase(r.status === 'no_issues' ? 'no_issues' : 'incomplete')
@@ -82,12 +53,12 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
   }
 
   const approve = async () => {
-    setPhase('applying'); setStep(0)
+    setPhase('applying'); setStage('Queued')
     try {
       const r = await callTool('agent_approve', {
         ...decisionArgs(data, true, decisionKey),
         aws_region:            region        || 'us-east-1',
-      })
+      }, { onJob: (job) => setStage(job.stage) })
       setResult(r)
       const finalPhase = ['complete', 'applying', 'uncertain', 'invalidated', 'rejected', 'failed'].includes(r.status) ? r.status : 'failed'
       setPhase(finalPhase)
@@ -196,7 +167,7 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
               <span className="aca-dots blue"><span /><span /><span /></span>
               <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Agent running</span>
             </div>
-            <AgentPhaseSteps step={step} />
+            <div role="status">{stage}</div>
           </div>
         )}
 
@@ -247,7 +218,7 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
           }}>
             <div className="aca-row" style={{ gap: 10, color: 'var(--accent-blue)', fontSize: 13 }}>
               <span className="aca-dots blue"><span /><span /><span /></span>
-              <span>Applying changes to AWS…</span>
+              <span role="status">{stage}</span>
             </div>
           </div>
         )}
@@ -259,7 +230,7 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
           }}>
             <div className="aca-row" style={{ gap: 10 }}>
               <span className="aca-badge success">✓ COMPLETE</span>
-              <span style={{ color: 'var(--text-primary)', fontSize: 13 }}>Finding remediated successfully.</span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 13 }}>Approved action completed. Re-scan to verify the finding.</span>
             </div>
             <pre className="aca-code" style={{ maxHeight: 260, margin: 0, color: 'var(--success)' }}>
               {result.apply_output}

@@ -11,7 +11,7 @@ Default: single operator, Docker Compose, one configured AWS account.
 - [x] 5. Return complete/partial/failed scan coverage; prevent false-clean claims; preserve security-group port ranges and sources.
 - [x] 6. Enforce transactional execution transitions, saved-plan approvals, idempotency, reviewed direct changes and separately approved destroy plans.
 - [x] 7. Isolate Terraform in a non-root worker; enforce provider/HCL policy; retain lockfiles; validate paths; align Terraform and S3 locking versions. Implementation complete; container build/smoke acceptance pending.
-- [ ] 8. Persist background jobs and real progress; handle interruptions without blindly retrying mutations.
+- [x] 8. Persist background jobs and real progress; handle interruptions without blindly retrying mutations. Core implementation complete locally; ambiguous outcomes remain locked for validated offline recovery.
 - [ ] 9. Correct filtered RAG retrieval and document replacement; evaluate retrieval; correct health scoring and cost periods.
 - [ ] 10. Update integration tests, exercise mocked end-to-end workflow, redact logs, document setup/backups/recovery; verify real changes only in a sandbox account.
 
@@ -498,3 +498,32 @@ tests were not rerun because the previous temporary Python environment no longer
 exists; the last recorded result remains 273 passing tests. Step 7 container runtime
 acceptance is still pending, and Step 8 has not started. Pre-existing analysis and
 handoff exports remain local.
+
+## Step 8 — durable jobs and controlled recovery — 4 November 2026
+
+Implemented after the user approved the simplified explanation. Long tools queue
+persisted jobs; a separate Compose/local worker runs the fixed operation registry.
+SQLite schema 5 backs up schema 4 before migration and preserves review-only legacy
+in-flight actions. Atomic worker claims/heartbeats fence stale status writers;
+approval and execution enqueue commit together, as do queued cancellation and
+revocation of its approved dispatch. Account/region is reverified with fresh
+server credentials; submitter identity crosses the process boundary without tokens.
+
+Real stage events replace timed agent steps. Browser polling and Background Jobs
+restore progress/results after reconnect; old proposal results reflect current
+action state. REST/MCP job APIs share authentication. Cross-process cache revision
+markers invalidate account context after mutations. A separate worker readiness
+probe distinguishes an available API from a missing worker.
+
+The private runner saves apply terminal outcomes durably. Read-only inspection
+and digest-bound confirmation can restore a lost successful completion without
+replay; active jobs cannot be unlocked. Ambiguous/partial Terraform results and
+interrupted direct SG mutations remain locked for validated offline recovery.
+Queued work can be cancelled, including an approval not yet claimed. Running work
+is not forcibly cancelled. No external AWS exactly-once guarantee is claimed.
+
+Published Step 7 CI was checked and all three image builds plus dummy container
+isolation smoke passed: https://github.com/mihirxtc/agentic-cloud-assistant/actions/runs/41772479505.
+Step 8 changes are local, uncommitted and unpushed. Full Compose restart/browser
+and live AWS acceptance are not performed. See status.md for latest verification.
+Next is Step 9; explain its plan and obtain approval before starting it.

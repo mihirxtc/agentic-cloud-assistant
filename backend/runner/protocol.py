@@ -2,7 +2,7 @@
 import re
 from runner.paths import workspace_id, artifact_name
 
-OPERATIONS = {'plan', 'destroy_plan', 'apply', 'manifest', 'key', 'ready'}
+OPERATIONS = {'plan', 'destroy_plan', 'apply', 'manifest', 'key', 'ready', 'outcome'}
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 
@@ -35,7 +35,7 @@ def validate_request(body):
             raise ValueError('Configuration exceeds size limit or is missing')
     elif 'hcl' in body or 'state_backend' in body:
         raise ValueError('Only new plans accept configuration')
-    if operation in ('destroy_plan', 'apply', 'manifest'):
+    if operation in ('destroy_plan', 'apply', 'manifest', 'outcome'):
         name = body.get('plan_file')
         artifact_name(name)
         if name != 'tfplan' and not str(name).startswith('destroy_'):

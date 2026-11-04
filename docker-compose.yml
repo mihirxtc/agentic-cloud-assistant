@@ -29,6 +29,30 @@ services:
       retries: 3
       start_period: 60s
 
+  job-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: [python, -m, services.job_worker]
+    env_file: [./backend/.env]
+    environment:
+      ACA_DATA_DIR: /app/data
+      CHROMA_DB_PATH: /app/chroma_db
+      ACA_RUNNER_URL: http://terraform-runner:8090
+      ACA_RUNNER_TOKEN_FILE: /run/credentials/token
+    volumes:
+      - app_data:/app/data
+      - chroma_data:/app/chroma_db
+      - runner_credentials:/run/credentials:ro
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=256m,uid=10001,gid=10001"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    restart: unless-stopped
+    stop_grace_period: 10m
+
   terraform-runner:
     build:
       context: ./backend

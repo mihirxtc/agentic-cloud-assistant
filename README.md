@@ -86,14 +86,14 @@ Docker mounts `app_data` at `/app/data` and `chroma_data` at `/app/chroma_db`
 in the non-root web API. Only the trusted runner mounts `terraform_workdirs` at
 `/workspaces` and its separate `runner_control` ledger at `/control`. Each job
 receives one workspace subpath. A private `runner_credentials` volume is mounted
-read-only in the API/runner; it is absent from jobs. Outside Docker, API defaults
+read-only in the API/background worker/runner; it is absent from Terraform job containers. Outside Docker, API defaults
 remain `backend/data` and `backend/chroma_db`; Terraform still requires the runner.
-`ACA_DATA_DIR` and `CHROMA_DB_PATH` configure API storage. SQLite uses schema version 4, including
+`ACA_DATA_DIR` and `CHROMA_DB_PATH` configure API storage. SQLite uses schema version 5, including
 server sessions, login throttling, scan provenance, idempotency requests, target
 locks and execution transition events. Upgrading a version-1, version-2 or
-version-3 database first creates a SQLite snapshot under
+version-3 or version-4 database first creates a SQLite snapshot under
 `data/backups/schema-vN-*.sqlite3`, preserving execution history and sessions.
-Durable job/reconciliation features remain planned.
+Durable jobs, worker claims and progress are persisted in this database. See Background jobs below.
 Existing execution dictionaries and history response shapes remain supported.
 Updating an unknown execution now raises an error rather than silently succeeding.
 
@@ -415,7 +415,7 @@ SG mutations targeting the same account/region/group. Failed and uncertain
 mutations keep their locks because remote changes may be partial. A process crash
 can leave `planning`/`applying` persisted and locked; this never authorizes retry.
 Check history and actual remote state. Do not clear database locks to force another
-mutation. Durable job recovery and a reviewed reconciliation workflow remain Step 8.
+mutation. Expired worker claims are recovered without replay; see Background jobs below.
 The UI labels uncertain results and no longer reports an immediate rollback.
 
 Saved-plan semantics follow [HashiCorp's plan reference](https://developer.hashicorp.com/terraform/cli/commands/plan)
@@ -482,7 +482,7 @@ Python environment to test the dummy non-root job. It creates/deletes only rando
 smoke-test volumes/networks, makes no AWS calls and supplies no AWS credentials.
 The GitHub Actions isolation job builds the checked image and runs this smoke test.
 Local Docker runtime/build verification was blocked by socket permissions in this
-session; the CI job has not yet been observed running.
+session. The published Step 7 images and dummy isolation smoke check subsequently passed in [GitHub Actions](https://github.com/mihirxtc/agentic-cloud-assistant/actions/runs/41772479505). Local deployment and live AWS execution remain unverified.
 
 For a host-based API, use the optional loopback override:
 `docker compose -f docker-compose.yml -f docker-compose.runner-dev.yml up terraform-runner terraform-egress`.
@@ -555,4 +555,90 @@ prints these instructions and performs no AWS calls or private-config writes.
 Dispatch evidence is persisted by both API and runner before mutation. Failed,
 uncertain or interrupted executions stay blocked; one-shot plans cannot be replayed
 after a lost response. Durable job scheduling and reviewed reconciliation are
-still Step 8. Do not clear locks/ledger entries to force execution.
+handled conservatively by the background job workflow below. Do not clear locks/ledger entries to force execution.
+
+
+## Background jobs, progress and recovery (Step 8)
+
+Long AWS scans, security/cost assessments, Terraform generation/planning, agent
+runs, ingress proposal preparation and destroy planning now return a persisted job
+instead of keeping the original request open. Approving a change atomically claims
+the reviewed action and queues its execution. Rejection stays local. Existing tool
+names and arguments remain, but clients must follow the returned `job_id` to its
+result. Bundled browser clients do this automatically. Chat, RAG, local validation,
+identity checks and short history/status operations retain their current interfaces.
+
+**Start the worker as well as the API.** Compose includes `job-worker`, built from
+the backend image with the same server configuration, data/Chroma volumes and private
+runner API credential. It has no Terraform binary, workspace mount or engine socket.
+For host development, use another terminal with the same virtual environment and
+server configuration:
+
+```bash
+cd backend
+python -m services.job_worker
+```
+
+Run the worker from `backend` just like the API. It loads `backend/.env` through the
+shared tool registry. It resolves fresh server credentials and verifies the saved
+AWS account/partition/region before executing each job. Job inputs never store the
+server AWS credentials, model API keys or session tokens. Nonempty caller `api_key`
+arguments are rejected for queued tools; configure models on the server instead.
+Treat requests/HCL and saved results as sensitive application data. Unlike the scan
+provenance table, completed job results can contain raw inventory and model output.
+There is currently no automated job-result retention cleanup; include the database
+in protected backups and size monitoring.
+
+Authenticated interfaces (browser session/CSRF or configured bearer token):
+
+- `GET /jobs?limit=50`: recent job summaries, bounded to at most 100.
+- `GET /jobs/{job_id}`: stage events, timestamps, identity, linked execution and result.
+- `POST /jobs/{job_id}/cancel`: cancel only while queued. If this is an approved
+  action, cancellation and rejection/lock release commit together before any worker
+  can claim it. A running mutation cannot be cancelled or undone through this route.
+- MCP tools `list_jobs`, `get_job`, `cancel_job` expose the same lifecycle.
+- `GET /ready/jobs`: authenticated worker heartbeat readiness, separate from API
+  and Terraform runner readiness. With no worker, requests remain queued.
+
+An explicit proposal `idempotency_key` also deduplicates its submission; changed
+content under the same key is rejected. Approval request keys deduplicate the
+approval/job transaction. Unkeyed read requests are distinct jobs. On a network
+failure, inspect Background Jobs before submitting another request. The browser
+polls saved stages; it never resubmits a mutation because polling failed. Reopening
+the dashboard lists recent jobs and lets the operator reopen their results and
+pending action reviews. Completed proposal views reflect the action's current
+status, so an old job does not present a completed change as awaiting approval.
+
+Workers use atomic claims, 10-second heartbeats and 60-second leases. A subsequent
+worker identifies expired work; it never requeues it automatically. A durable
+already-saved action result is restored when available. Otherwise read/planning
+jobs become `interrupted`; mutations become `reconciliation_required`, with the
+action marked `uncertain` and its lock retained. A stale worker cannot overwrite
+that recovered job. Running reads/plans are not forcibly cancelled; create a new
+request after inspecting the old operation. No claim provides exactly-once
+execution of an external AWS API across arbitrary process/network failure.
+
+Use `inspect_interrupted_action` to read runner outcome evidence or current SG
+permissions without mutating infrastructure. The runner now durably records apply
+dispatch and terminal results in its control ledger. A successful terminal outcome
+can be reviewed and confirmed with `reconcile_action(execution_id,
+evidence_digest, ...)`; the evidence is checked again and an active job cannot be
+unlocked. Confirmation restores completion and releases its target lock without
+replaying Terraform. These controls are available in the Background Jobs detail.
+
+An absent result, busy/unreachable runner, partial/failed apply, legacy dispatch
+without terminal evidence, or interrupted direct SG call remains unresolved and
+locked. Current SG permissions alone cannot prove an older SDK call has stopped.
+Stop and inspect the original worker/runner, preserve database/control/state
+backups, and validate AWS state before a separately reviewed offline recovery.
+There is deliberately no general-purpose force-unlock or automatic retry endpoint.
+An approved execution finishing successfully still requires a rescan to establish
+whether the original finding was fixed.
+
+Before this schema upgrade, stop **all API and worker writers**, back up application
+and runner/state volumes, and upgrade them together. Schema 4 gets a backup before
+migration; legacy in-flight actions become review-only job records and are never
+adopted for execution. Restarted queued jobs run only through the configured worker.
+Compose grants the worker ten minutes for graceful shutdown; forced termination
+uses the interrupted-job recovery behavior above. Local process/container restart
+and live AWS acceptance still need deployment-level validation.

@@ -52,8 +52,11 @@ def _begin(action_type, lock_key, request, idempotency_key='', reserve=False, **
     entry = {'execution_id': fields.pop('execution_id', None) or create_execution_id(), 'status': 'planning', 'action_type': action_type,
              'lock_key': lock_key, 'aws_identity': get_connection().identity,
              'timestamp': datetime.now(timezone.utc).isoformat(), **fields}
-    return get_execution_store().create_action(entry, _key(idempotency_key, 'proposal:') if idempotency_key else '',
+    result = get_execution_store().create_action(entry, _key(idempotency_key, 'proposal:') if idempotency_key else '',
                                                fingerprint({'action': action_type, 'identity': _identity(), 'request': request}), reserve)
+    from services.jobs import progress
+    progress('Preparing action', result[0]['execution_id'])
+    return result
 
 
 def _prepare(entry, result):
@@ -70,6 +73,8 @@ def _prepare(entry, result):
             updates.update(status='plan_failed', error='Saved plan could not be verified; no approval is available')
     else:
         updates.update(status='plan_failed')
+    from services.jobs import progress
+    progress('Saving reviewable proposal', entry['execution_id'])
     return action_view(store.prepare_action(entry['execution_id'], updates))
 
 
@@ -148,16 +153,29 @@ def propose_destroy(execution_id, idempotency_key=''):
 
 
 def decide(execution_id, approved, approval_digest='', idempotency_key=''):
-    from services import execution_service as execution
     store = get_execution_store()
     if not isinstance(approved, bool):
         raise ValueError('Approval decision must be true or false')
     # Rejection is local, including legacy proposals, and cannot mutate infrastructure.
     key = _key(idempotency_key or ('reject_' + execution_id if not approved else ''), 'decision:')
     request = fingerprint({'execution_id': execution_id, 'approved': approved, 'digest': approval_digest})
-    entry, claimed = store.claim_action(execution_id, approved, approval_digest, key, request)
+    from services.jobs import active_job, new_job, Jobs, public
+    job = new_job('_approved_action', {}, get_connection().identity) if approved and active_job.get() is None else None
+    entry, claimed = store.claim_action(execution_id, approved, approval_digest, key, request, job=job)
+    if approved and entry.get('job_id') and active_job.get() is None:
+        return public(Jobs(store).get(entry['job_id']))
     if not claimed or not approved:
         return action_view(entry)
+    return execute_claimed(entry)
+
+
+def execute_claimed(entry):
+    """Worker-only execution of an already transactionally approved action."""
+    from services import execution_service as execution
+    from services.jobs import progress
+    execution_id = entry['execution_id']
+    store = get_execution_store()
+    progress('Verifying reviewed action', execution_id)
     try:
         require_record_connection(execution_id)
         if seal(entry) != entry['approval_digest']:
@@ -174,11 +192,14 @@ def decide(execution_id, approved, approval_digest='', idempotency_key=''):
         if entry['action_type'] == 'sg_revoke':
             # Submit the reviewed permissions only, never newly-discovered sources.
             client = get_connection().client('ec2', region_name=get_connection().region)
+            progress('Dispatching reviewed ingress removal', execution_id)
             client.revoke_security_group_ingress(GroupId=entry['sg_id'], IpPermissions=entry['permissions'])
             result = {'success': True, 'apply_output': 'Reviewed ingress rules revoked', 'resources_applied': [entry['sg_id']]}
         else:
+            progress('Applying reviewed Terraform plan', execution_id)
             result = execution.run_terraform_apply(execution_id)
         status = 'complete' if result.get('success') else 'uncertain' if result.get('uncertain') else 'failed'
+        progress('Saving execution outcome', execution_id)
         return action_view(store.finish_action(execution_id, status, {key: value for key, value in result.items() if key != 'success'}))
     except BaseException as error:
         # A lost response/timeout after dispatch cannot establish whether AWS changed.

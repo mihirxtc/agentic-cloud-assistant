@@ -41,6 +41,8 @@ def run_terraform_apply(execution_id):
         return {'success': False, 'uncertain': False, 'apply_output': 'A claimed, reviewed runner action is required'}
     require_record_connection(execution_id)
     try:
+        from services.jobs import progress
+        progress('Dispatching saved Terraform plan', execution_id)
         return runner_client.operation('apply', action['workspace_id'], credentials=True,
                                        plan_file=action['plan_file'], expected_manifest=action['manifest'])
     except Exception:

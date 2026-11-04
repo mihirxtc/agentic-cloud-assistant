@@ -168,6 +168,9 @@ class Broker:
             meta = self.metadata(identifier)
         if meta['identity'] != body['identity']:
             raise ValueError('Workspace identity differs from the recorded operation')
+        if operation == 'outcome':
+            return {'dispatched': body['plan_file'] in meta['dispatched'],
+                    'outcome': meta.get('outcomes', {}).get(body['plan_file'])}
         if operation == 'key':
             return {'content_base64': base64.b64encode(read_file(root, 'ssh-key.pem', 65536)).decode()}
         if meta['policy_hash'] != self.policy_hash or meta['image'] != self.image:
@@ -184,7 +187,9 @@ class Broker:
             if plan_file in meta['dispatched']:
                 raise ValueError('Saved plan was already dispatched; reconcile outcome before further action')
             # Persist before launching: a broker crash/lost HTTP response cannot replay apply.
-            meta['dispatched'].append(plan_file); self.save(identifier, meta)
+            meta['dispatched'].append(plan_file)
+            meta.setdefault('outcomes', {})[plan_file] = {'status': 'running'}
+            self.save(identifier, meta)
         if operation == 'destroy_plan' and plan_file in meta['plans']:
             raise ValueError('Destroy plan already exists')
         name = 'aca-job-' + uuid.uuid4().hex
@@ -193,7 +198,7 @@ class Broker:
         try:
             result = run_container(self.command(identifier, name), json.dumps(job).encode())
         except Exception:
-            return {'success': False, 'uncertain': operation == 'apply', 'error': 'Runner execution unavailable or interrupted'}
+            result = {'success': False, 'uncertain': operation == 'apply', 'error': 'Runner execution unavailable or interrupted'}
         finally:
             # Never stop/reuse another job name; Docker CLI arguments are fixed, not shell text.
             subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=15, check=False)
@@ -206,6 +211,9 @@ class Broker:
             else:
                 meta['plans'][plan_file] = self.hashes(identifier, plan_file, meta)
                 result['manifest'] = meta['plans'][plan_file]
+            self.save(identifier, meta)
+        if operation == 'apply':
+            meta.setdefault('outcomes', {})[plan_file] = {'status': 'complete' if result.get('success') else 'uncertain', 'result': result}
             self.save(identifier, meta)
         return result
 

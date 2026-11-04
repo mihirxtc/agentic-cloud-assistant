@@ -56,6 +56,7 @@ from services.terraform_service import (
 mcp = FastMCP("agentic-cloud-assistant")
 
 from services.aws_connection import aws_operation, get_connection, require_record_connection, require_scan_connection
+from services.jobs import durable, progress, Jobs, public
 from services.aws_cache import cached_context
 from services.storage import get_execution_store
 from services.action_service import propose_terraform, propose_ingress, propose_destroy, decide
@@ -66,10 +67,12 @@ _SCAN_SERVICES = ("ec2", "s3", "iam", "security_groups", "vpc")
 def _collect_scan(region=""):
     connection = get_connection(region)
     started_at = datetime.now(timezone.utc).isoformat()
-    services = {
-        "ec2": scan_ec2(region=connection.region), "s3": scan_s3(), "iam": scan_iam(),
-        "security_groups": scan_security_groups(region=connection.region), "vpc": scan_vpc(region=connection.region),
-    }
+    services = {}
+    for name, scan in (("ec2", lambda: scan_ec2(region=connection.region)), ("s3", scan_s3),
+                       ("iam", scan_iam), ("security_groups", lambda: scan_security_groups(region=connection.region)),
+                       ("vpc", lambda: scan_vpc(region=connection.region))):
+        progress('Scanning ' + name.replace('_', ' '))
+        services[name] = scan()
     scan_id = get_execution_store().record_scan(connection.identity, services)
     coverage = scan_coverage(services)
     return {**services, "scan_id": scan_id, "aws_identity": connection.identity,
@@ -100,6 +103,7 @@ def health_check() -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def full_aws_scan(region: str = "", expected_account_id: str = "") -> dict:
     """Run all five AWS service scans and return combined infrastructure data."""
     return _collect_scan(region)
@@ -114,6 +118,7 @@ def aws_connection_identity(region: str = "") -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_ec2_instances(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all EC2 instances in the specified AWS region."""
     return scan_ec2(region=region)
@@ -121,6 +126,7 @@ def scan_ec2_instances(region: str = "", expected_account_id: str = "") -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_s3_buckets(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all S3 buckets and check public-access status."""
     return scan_s3()
@@ -128,6 +134,7 @@ def scan_s3_buckets(region: str = "", expected_account_id: str = "") -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_iam_users(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all IAM users and check MFA status and last-login date."""
     return scan_iam()
@@ -135,6 +142,7 @@ def scan_iam_users(region: str = "", expected_account_id: str = "") -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_security_groups_detail(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all EC2 security groups and flag dangerous internet-facing rules."""
     return scan_security_groups(region=region)
@@ -142,6 +150,7 @@ def scan_security_groups_detail(region: str = "", expected_account_id: str = "")
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_vpc_detail(region: str = "", expected_account_id: str = "") -> dict:
     """Scan all VPCs including subnet counts."""
     return scan_vpc(region=region)
@@ -149,6 +158,7 @@ def scan_vpc_detail(region: str = "", expected_account_id: str = "") -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def scan_sg_usage_tool(
     region: str = "",
     expected_account_id: str = "",
@@ -166,6 +176,7 @@ def analyse_security_findings(scan_data: dict) -> dict:
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 async def run_security_analysis_with_summary(
     region: str = "",
     model: str = "groq",
@@ -176,6 +187,7 @@ async def run_security_analysis_with_summary(
     """Scan AWS, run security rules, and generate an LLM plain-English summary."""
     scan_data = _collect_scan(region)
 
+    progress('Assessing scan coverage and findings')
     result = assessment(scan_data)
     # Coverage and no-finding wording are deterministic, not delegated to a model.
     if result["status"] == "complete" and result["findings"]:
@@ -185,6 +197,7 @@ async def run_security_analysis_with_summary(
             + json.dumps(result["findings"])
         )
         try:
+            progress("Generating findings summary")
             result["llm_summary"] = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
         except Exception:
             result["summary_error"] = "Model summary unavailable; confirmed findings are retained."
@@ -193,6 +206,7 @@ async def run_security_analysis_with_summary(
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 def estimate_costs(region: str = "", time_period_days: int = 30, expected_account_id: str = "") -> dict:
     """Retrieve AWS spend data and detect cost anomalies via Cost Explorer."""
     months = max(1, time_period_days // 30)
@@ -208,6 +222,7 @@ def estimate_costs(region: str = "", time_period_days: int = 30, expected_accoun
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 async def get_cost_with_summary(
     region: str = "",
     model: str = "groq",
@@ -233,6 +248,7 @@ async def get_cost_with_summary(
         "provide 3-4 actionable recommendations in plain English:\n\n"
         + json.dumps(cost_summary, indent=2, default=str)
     )
+    progress("Generating cost summary")
     llm_summary = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
 
     return {
@@ -246,6 +262,7 @@ async def get_cost_with_summary(
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 async def generate_terraform_hcl(resource_type: str, config: dict, region: str = "", expected_account_id: str = "") -> dict:
     """Generate Terraform HCL from a resource type and config dict."""
     model = "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "groq"
@@ -269,6 +286,7 @@ async def generate_terraform_hcl(resource_type: str, config: dict, region: str =
 
 @mcp.tool()
 @aws_operation('aws_region')
+@durable
 async def generate_terraform_from_request(
     request: str,
     model: str = "groq",
@@ -305,6 +323,7 @@ async def generate_terraform_from_request(
         except Exception:
             pass
 
+    progress('Generating Terraform configuration')
     result = await generate_terraform(request, resolved_model, resolved_key, existing_infra)
 
     naming_note = (
@@ -348,6 +367,7 @@ def validate_terraform_plan(hcl: str) -> dict:
 
 @mcp.tool()
 @aws_operation('aws_region')
+@durable
 async def run_terraform_plan_mcp(
     hcl_config: str, description: str = "", aws_region: str = "",
     expected_account_id: str = "", idempotency_key: str = "",
@@ -367,6 +387,40 @@ def run_terraform_apply_mcp(
     result["key_files"] = [{"name": key["name"], "download_path": f"/terraform/keys/{execution_id}/{key['name']}"}
                            for key in result.get("key_files", [])]
     return result
+
+
+@mcp.tool()
+def list_jobs(limit: int = 50) -> dict:
+    """List durable jobs; results remain available after browser/backend restarts."""
+    return {'jobs': Jobs().list(limit)}
+
+
+@mcp.tool()
+def get_job(job_id: str) -> dict:
+    """Get persisted job progress and its result; never dispatches work."""
+    return public(Jobs().get(job_id))
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> dict:
+    """Cancel queued work before worker claim; does not undo dispatched infrastructure changes."""
+    return Jobs().cancel(job_id)
+
+
+@mcp.tool()
+@aws_operation('aws_region', execution=True)
+def inspect_interrupted_action(execution_id: str, aws_region: str = "", expected_account_id: str = "") -> dict:
+    """Read outcome evidence without retrying a mutation or releasing its lock."""
+    from services.reconciliation import inspect_action
+    return inspect_action(execution_id)
+
+
+@mcp.tool()
+@aws_operation('aws_region', execution=True)
+def reconcile_action(execution_id: str, evidence_digest: str, aws_region: str = "", expected_account_id: str = "") -> dict:
+    """Confirm reviewed terminal runner evidence; unresolved actions remain locked."""
+    from services.reconciliation import reconcile
+    return reconcile(execution_id, evidence_digest)
 
 
 @mcp.tool()
@@ -448,6 +502,7 @@ async def aws_chat(
 
 @mcp.tool()
 @aws_operation('region')
+@durable
 async def agent_run(
     region: str = "",
     model: str = "groq",
@@ -459,6 +514,7 @@ async def agent_run(
 
     scan_data = _collect_scan(region)
 
+    progress('Assessing scan coverage and findings')
     result = assessment(scan_data)
     if result["status"] != "complete":
         return {**result, "message": result["llm_summary"] + " Remediation was not started."}
@@ -494,12 +550,14 @@ async def agent_run(
         existing_infra = ""
     existing_infra = f"TARGET AWS ACCOUNT: {get_connection().account_id}; REGION: {get_connection().region}.\n" + existing_infra
 
+    progress('Generating remediation configuration')
     terraform_result = await generate_terraform(fix_request, resolved_model, resolved_key, existing_infra)
     if terraform_result.get("error"):
         return {"status": "error", "error": terraform_result["error"]}
 
     hcl = terraform_result.get("hcl", "")
 
+    progress('Planning proposed remediation')
     proposal = await asyncio.to_thread(propose_terraform, hcl, fix_request)
     return {**proposal, "issue": issue, "hcl": hcl, "summary": "Review the saved Terraform plan before approving."}
 
@@ -516,6 +574,7 @@ def agent_approve(
 
 @mcp.tool()
 @aws_operation('region', scan=True)
+@durable
 def revoke_open_ingress_rule(
     sg_id: str, port: int, scan_id: str, region: str = "", expected_account_id: str = "", idempotency_key: str = "",
 ) -> dict:
@@ -535,6 +594,7 @@ def mark_execution_resolved(execution_id: str) -> dict:
 
 @mcp.tool()
 @aws_operation('aws_region', execution=True)
+@durable
 async def rollback_execution(
     execution_id: str, aws_region: str = "", expected_account_id: str = "", idempotency_key: str = "",
 ) -> dict:

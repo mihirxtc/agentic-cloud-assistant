@@ -130,6 +130,35 @@ def create_app():
         result = readiness()
         return JSONResponse(result, status_code=200 if result["ready"] else 503)
 
+    @app.get('/ready/jobs', tags=['Health'])
+    def worker_readiness():
+        from services.jobs import Jobs
+        ready = Jobs(store).worker_ready()
+        return JSONResponse({'ready': ready}, status_code=200 if ready else 503)
+
+    @app.get('/jobs', tags=['Jobs'])
+    def list_jobs(limit: int = 50):
+        from services.jobs import Jobs
+        return {'jobs': Jobs(store).list(limit)}
+
+    @app.get('/jobs/{job_id}', tags=['Jobs'])
+    def get_job(job_id: str):
+        from services.jobs import Jobs, public
+        try:
+            return public(Jobs(store).get(job_id))
+        except KeyError:
+            raise HTTPException(status_code=404, detail='Job does not exist') from None
+
+    @app.post('/jobs/{job_id}/cancel', tags=['Jobs'])
+    def cancel_job(job_id: str):
+        from services.jobs import Jobs
+        try:
+            return Jobs(store).cancel(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail='Job does not exist') from None
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
     @app.get("/api/ollama/status", tags=["Ollama"])
     async def ollama_status(request: Request):
         return await server._ollama_status_endpoint(request)
