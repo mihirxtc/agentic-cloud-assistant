@@ -1,43 +1,129 @@
 services:
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     env_file:
-      - ./backend/.env        # copy backend/.env.example → backend/.env and fill in keys
+      - ./backend/.env
     environment:
       ACA_DATA_DIR: /app/data
       CHROMA_DB_PATH: /app/chroma_db
+      ACA_RUNNER_URL: http://terraform-runner:8090
+      ACA_RUNNER_TOKEN_FILE: /run/credentials/token
     volumes:
-      - app_data:/app/data                # SQLite history and migration backups
-      - chroma_data:/app/chroma_db        # ChromaDB vector data
-      - terraform_workdirs:/app/terraform_workdirs  # tfstate and workdirs
-    expose:
-      - "8000"                # internal only — Nginx proxies to this
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # lets backend reach Ollama on the host (Linux only)
+      - app_data:/app/data
+      - chroma_data:/app/chroma_db
+      - runner_credentials:/run/credentials:ro
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=256m,uid=10001,gid=10001"]
+    expose: ["8000"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ready"]
+      test: [CMD, curl, -f, "http://localhost:8000/ready"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s   # allows sentence-transformers to load on first start
+      start_period: 60s
+
+  terraform-runner:
+    build:
+      context: ./backend
+      dockerfile: runner/Dockerfile.runner
+    environment:
+      ACA_RUNNER_CONFIG: /run/config/runner.json
+      ACA_JOB_IMAGE: ${ACA_JOB_IMAGE:-}
+      ACA_WORKSPACE_VOLUME: ${ACA_WORKSPACE_VOLUME:-agentic-cloud-assistant_terraform_workdirs}
+      ACA_JOB_NETWORK: aca_terraform_jobs
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - terraform_workdirs:/workspaces
+      - runner_control:/control
+      - runner_credentials:/run/credentials:ro
+      - type: bind
+        source: ./backend/runner/config.json
+        target: /run/config/runner.json
+        read_only: true
+        bind:
+          create_host_path: false
+      # Trusted runner only. For rootless Docker, set its socket and group explicitly.
+      - ${ACA_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    group_add: ["${ACA_DOCKER_GID:-999}"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001"]
+    expose: ["8090"]
+    networks: [default, terraform_jobs]
+    depends_on: [terraform-egress]
+    restart: unless-stopped
+
+  terraform-egress:
+    build:
+      context: ./backend
+      dockerfile: runner/Dockerfile.egress
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [terraform_jobs, terraform_egress]
+    expose: ["3128"]
+    restart: unless-stopped
+
+  runner-token-init:
+    profiles: [setup]
+    build:
+      context: ./backend
+      dockerfile: runner/Dockerfile.runner
+    entrypoint: [python, -m, runner.token]
+    command: []
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    volumes:
+      - runner_credentials:/credentials
+
+  terraform-job:
+    profiles: [build]
+    image: aca-terraform-job:step7
+    build:
+      context: ./backend
+      dockerfile: runner/Dockerfile.job
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    ports:
-      - "80:80"             # app available at http://localhost
+    ports: ["80:80"]
     depends_on:
       backend:
-        condition: service_healthy   # waits for local dependencies to be ready
+        condition: service_healthy
     restart: unless-stopped
 
-# Persist data across docker compose down / up
 volumes:
   app_data:
   chroma_data:
+  # Explicit names let the runner mount one workspace subpath, never the entire volume.
   terraform_workdirs:
+    name: ${ACA_WORKSPACE_VOLUME:-agentic-cloud-assistant_terraform_workdirs}
+  runner_control:
+    name: aca_runner_control
+  runner_credentials:
+    name: aca_runner_credentials
+
+networks:
+  terraform_jobs:
+    name: aca_terraform_jobs
+    internal: true
+  terraform_egress:

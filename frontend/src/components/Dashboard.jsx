@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../contexts/useAuth'
 import { useApiKeys } from '../contexts/useApiKeys'
+import { isAssessmentComplete } from '../utils/assessment'
 import { computeHealthScore } from '../utils/scoring'
 import { callTool } from '../api/mcpClient'
 import toast from 'react-hot-toast'
@@ -60,7 +61,7 @@ export default function Dashboard({ onOpenSettings }) {
         region:  keys.region || 'us-east-1',
       })
       setSecurity(d)
-      setSecurityScore(computeHealthScore(d.findings))
+      setSecurityScore(isAssessmentComplete(d) ? computeHealthScore(d.findings) : null)
     } catch (error) { setSecurity(null); setSecurityScore(null); toast.error(error.message) } finally { setSecurityLoading(false) }
   }, [keys.model, keys.region])
 
@@ -87,16 +88,15 @@ export default function Dashboard({ onOpenSettings }) {
     const port = portMap[finding.rule]
     if (!port) throw new Error(`No direct fix available for rule ${finding.rule}`)
     const result = await callTool('revoke_open_ingress_rule', {
+      idempotency_key: crypto.randomUUID(),
       sg_id:                 finding.resource_id,
       scan_id:               finding.scan_id,
       port,
       region:                keys.region            || 'us-east-1',
     })
-    if (!result.success) throw new Error(result.message)
-    // Re-scan security after a short delay so AWS state settles
-    setTimeout(runSecurity, 2500)
+    if (result.status !== 'awaiting_approval') throw new Error(result.error || 'No reviewable action was prepared')
     return result
-  }, [keys, runSecurity])
+  }, [keys])
 
   // Called by TerraformPanel / SecurityAgentPanel after a successful apply
   const onInfraChanged = useCallback(() => {

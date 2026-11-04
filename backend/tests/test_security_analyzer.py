@@ -150,7 +150,7 @@ def test_unrestricted_traffic_status_not_ok():
 
 
 def test_iam_inactive_never_logged_in():
-    result = check_iam_user_inactive(_iam_data({"username": "alice", "last_login": "Never"}))
+    result = check_iam_user_inactive(_iam_data({"username": "alice", "last_login": "Never", "created": "2020-01-01T00:00:00+00:00"}))
     assert len(result) == 1
     assert result[0]["rule"] == "IAM_USER_INACTIVE"
     assert result[0]["severity"] == "LOW"

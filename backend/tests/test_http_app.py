@@ -26,7 +26,7 @@ def test_both_http_entrypoints_expose_the_same_routes(environment):
             assert client.get("/ready").status_code == 200
             assert client.get("/api/ollama/status").json() == {"state": "ready"}
             assert client.post("/tools/health_check").json()["status"] == "ok"
-            assert client.get("/terraform/keys/missing/test.pem").status_code == 404
+            assert client.get("/terraform/keys/exec_20261103_120000_1234abcd/ssh-key.pem").status_code == 404
             assert "/api/ollama/pull" in client.get("/openapi.json").json()["paths"]
 
 
@@ -41,21 +41,20 @@ def test_readiness_failure_does_not_change_liveness(environment, monkeypatch):
         assert client.get("/health").status_code == 200
 
 
-@pytest.mark.parametrize("dependency", ["knowledge_base", "terraform", "terraform_workdirs"])
-def test_missing_required_dependency_is_not_ready(environment, monkeypatch, dependency):
+def test_missing_knowledge_base_is_not_ready(environment, monkeypatch):
     server, factory, _, _ = environment
-    if dependency == "knowledge_base":
-        monkeypatch.setattr(server, "_RAG_AVAILABLE", False)
-    elif dependency == "terraform":
-        import services.readiness as readiness
-        monkeypatch.setattr(readiness.shutil, "which", lambda name: None)
-    else:
-        path = factory.WORKDIR_BASE
-        path.write_text("a file cannot serve as a workdir")
+    monkeypatch.setattr(server, "_RAG_AVAILABLE", False)
     with TestClient(factory.create_app(), headers={"Authorization": "Bearer test-mcp-token"}) as client:
-        result = client.get("/ready")
-        assert result.status_code == 503
-        assert result.json()["checks"][dependency] == "unavailable"
+        assert client.get("/ready").status_code == 503
+
+
+def test_runner_unavailable_does_not_block_api_readiness(environment, monkeypatch):
+    _, factory, _, _ = environment
+    from services import runner_client
+    monkeypatch.setattr(runner_client, "readiness", lambda: {"ready": False})
+    with TestClient(factory.create_app(), headers={"Authorization": "Bearer test-mcp-token"}) as client:
+        assert client.get("/ready").status_code == 200
+        assert client.get("/ready/terraform").status_code == 503
 
 
 def test_upload_and_ollama_validation_use_shared_http_routes(environment):
@@ -119,17 +118,22 @@ def test_ollama_pull_stream_and_private_key_download(environment, monkeypatch):
         yield '{"status":"success"}\n'
 
     monkeypatch.setattr(server, "stream_ollama_pull", progress)
-    import services.execution_service as execution
-    keydir = execution.WORKDIR_BASE / "test-execution"
-    keydir.mkdir(parents=True)
-    (keydir / "test.pem").write_bytes(b"test fixture, not a real key")
+    _, _, store, _ = environment
+    identifier = "exec_20261103_120000_1234abcd"
+    from runner.paths import workspace, write_file
+    keydir = workspace(store.test_runner.root, identifier, create=True)
+    write_file(keydir, "ssh-key.pem", b"test fixture, not a real key")
+    store.append({"execution_id": identifier, "workspace_id": identifier, "runner_contract": 1,
+                  "status": "complete", "action_type": "terraform_apply",
+                  "aws_identity": {"account_id": "111111111111", "region": "eu-west-1", "partition": "aws",
+                                   "arn": "arn:aws:iam::111111111111:user/test"}})
     with TestClient(factory.create_app(), headers={"Authorization": "Bearer test-mcp-token"}) as client:
         response = client.post("/api/ollama/pull", json={"model": server.DEFAULT_MODEL})
         assert response.status_code == 200
         assert response.text == '{"status":"success"}\n'
-        response = client.get("/terraform/keys/test-execution/test.pem")
+        response = client.get("/terraform/keys/exec_20261103_120000_1234abcd/ssh-key.pem")
         assert response.content == b"test fixture, not a real key"
-        assert response.headers["content-disposition"] == 'attachment; filename="test.pem"'
+        assert response.headers["content-disposition"] == 'attachment; filename="ssh-key.pem"'
 
 
 @pytest.mark.parametrize("stdio", [False, True])

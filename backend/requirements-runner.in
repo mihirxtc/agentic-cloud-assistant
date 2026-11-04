@@ -1,0 +1,3 @@
+# Minimal job/runner libraries; web API and model clients are excluded.
+boto3
+python-hcl2

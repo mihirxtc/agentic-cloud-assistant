@@ -2,17 +2,19 @@ import {
   BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import { CHART_COLORS } from '../../utils/constants'
+import ScanCoverage from '../ui/ScanCoverage'
+import { inventoryValue } from '../../utils/assessment'
 import DarkTooltip from '../ui/DarkTooltip'
 
 export default function InfrastructurePanel({ data, loading, onScan, lastRefresh }) {
   const tiles = data ? [
-    { key: 'EC2', value: data.ec2?.count              ?? 0, color: CHART_COLORS.blue },
-    { key: 'S3',  value: data.s3?.count               ?? 0, color: CHART_COLORS.success },
-    { key: 'IAM', value: data.iam?.user_count          ?? 0, color: CHART_COLORS.warning },
-    { key: 'SG',  value: data.security_groups?.count   ?? 0, color: CHART_COLORS.error },
-    { key: 'VPC', value: data.vpc?.count               ?? 0, color: '#a78bfa' },
+    { key: 'EC2', value: inventoryValue(data.ec2), color: CHART_COLORS.blue },
+    { key: 'S3',  value: inventoryValue(data.s3), color: CHART_COLORS.success },
+    { key: 'IAM', value: inventoryValue(data.iam, 'user_count'), color: CHART_COLORS.warning },
+    { key: 'SG',  value: inventoryValue(data.security_groups), color: CHART_COLORS.error },
+    { key: 'VPC', value: inventoryValue(data.vpc), color: '#a78bfa' },
   ] : []
-  const barData    = tiles.map((t) => ({ name: t.key, value: t.value, fill: t.color }))
+  const barData    = tiles.filter((t) => t.value !== null).map((t) => ({ name: t.key, value: t.value, fill: t.color }))
   const tileLabels = { EC2: 'EC2 Instances', S3: 'S3 Buckets', IAM: 'IAM Users', SG: 'Security Groups', VPC: 'VPCs' }
 
   return (
@@ -22,7 +24,7 @@ export default function InfrastructurePanel({ data, loading, onScan, lastRefresh
           <span className="aca-panel-title">Infrastructure</span>
           {data && (
             <span className="aca-badge muted mono">
-              {(data.ec2?.count ?? 0) + (data.s3?.count ?? 0) + (data.iam?.user_count ?? 0) + (data.security_groups?.count ?? 0) + (data.vpc?.count ?? 0)} resources
+              {tiles.reduce((sum, t) => sum + (t.value ?? 0), 0)} observed resources
             </span>
           )}
         </div>
@@ -49,10 +51,11 @@ export default function InfrastructurePanel({ data, loading, onScan, lastRefresh
         )}
         {data && !loading && (
           <div>
+            <ScanCoverage data={data} />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
               {tiles.map((t) => (
                 <div key={t.key} className="aca-tile">
-                  <div className="aca-tile-value mono">{t.value}</div>
+                  <div className="aca-tile-value mono">{t.value ?? 'Unknown'}</div>
                   <div className="aca-tile-label">
                     <span style={{ width: 6, height: 6, borderRadius: 1, background: t.color, display: 'inline-block' }} />
                     {tileLabels[t.key]}

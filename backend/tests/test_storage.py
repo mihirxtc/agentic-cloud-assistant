@@ -124,7 +124,7 @@ def test_schema_v1_upgrade_preserves_history_and_backs_up_database(tmp_path):
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
         assert connection.execute("SELECT execution_id FROM executions").fetchone()[0] == "old"
     with sqlite3.connect(store.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
 
 

@@ -196,7 +196,12 @@ class AuthenticationMiddleware:
                 await respond(403, "CSRF validation failed")
                 return
         scope.setdefault("state", {})["identity"] = identity
-        await self.app(scope, receive, private_send)
+        from services.action_identity import actor
+        token = actor.set({"operator": identity["operator"], "kind": identity["kind"]})
+        try:
+            await self.app(scope, receive, private_send)
+        finally:
+            actor.reset(token)
 
 
 def main():

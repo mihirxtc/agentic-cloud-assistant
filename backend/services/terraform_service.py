@@ -1,20 +1,11 @@
 import json
 import os
 import re
-import subprocess
-import tempfile
-from pathlib import Path
 
 import anthropic
 import httpx
 from groq import Groq
 
-from services.aws_terraform_guard import validate_aws_configuration
-from services.aws_connection import AWSIdentityError
-
-# Shared plugin cache for the validate subprocess — same directory as used by
-# execution_service, so providers downloaded during plan/apply are reused here.
-_PLUGIN_CACHE_DIR = Path(__file__).parent.parent / "terraform_plugin_cache"
 
 # TERRAFORM_TOOL is still used by generate_terraform_with_anthropic to force
 # structured output (tool_choice) from the Anthropic API. It is NOT the old
@@ -27,7 +18,7 @@ TERRAFORM_TOOL = {
         "properties": {
             "hcl": {
                 "type": "string",
-                "description": "Complete Terraform HCL including terraform{} with hashicorp/aws ~>5.0 AND hashicorp/random ~>3.0 providers, a random_id suffix resource, provider{}, variable{}, and all resource blocks. Every AWS resource name MUST include ${random_id.suffix.hex} to guarantee uniqueness.",
+                "description": "Complete Terraform HCL including terraform{} with server-pinned aws=5.100.0 and random=3.7.2 providers, a random_id suffix resource, provider{}, variable{}, and all resource blocks. Every AWS resource name MUST include ${random_id.suffix.hex} to guarantee uniqueness.",
             },
             "resource_type": {
                 "type": "string",
@@ -43,254 +34,35 @@ TERRAFORM_TOOL = {
 }
 
 
-SYSTEM_PROMPT = """\
-You are a Terraform expert that generates clean, valid AWS HCL configurations.
-
-NAMING UNIQUENESS — CRITICAL:
-Every config MUST include the hashicorp/random provider and a random_id resource so that
-resource names are unique across multiple deployments of the same template:
-
-  terraform {
-    required_providers {
-      aws    = { source = "hashicorp/aws",    version = "~> 5.0" }
-      random = { source = "hashicorp/random", version = "~> 3.0" }
-    }
-  }
-
-  resource "random_id" "suffix" { byte_length = 4 }
-
-Append ${random_id.suffix.hex} to resource names that must be GLOBALLY UNIQUE in AWS
-(security group names within a VPC, S3 bucket names, IAM entity names, DB identifiers,
-key pair names). EC2 Name TAGS do not need the suffix — use the user's requested name
-exactly as the Name tag value.
-  tags = { Name = "mihir-server-1" }          # exact user-specified name in tag
-  name = "demo-sg-${random_id.suffix.hex}"    # suffix only on names that must be unique
-This prevents 400/409 "already exists" conflicts on every re-deploy.
-
-EC2 SSH KEY PAIR — MANDATORY for EVERY aws_instance, no exceptions:
-Even if the user does not mention SSH, keys, or port 22 — you MUST always generate a TLS
-key pair and save the private key as a .pem file so the user can connect to their instance.
-Use the tls and local providers in required_providers for every EC2 config:
-
-  terraform {
-    required_providers {
-      aws    = { source = "hashicorp/aws",    version = "~> 5.0" }
-      random = { source = "hashicorp/random", version = "~> 3.0" }
-      tls    = { source = "hashicorp/tls",    version = "~> 4.0" }
-      local  = { source = "hashicorp/local",  version = "~> 2.0" }
-    }
-  }
-
-  resource "tls_private_key" "ssh" {
-    algorithm = "RSA"
-    rsa_bits  = 4096
-  }
-
-  resource "aws_key_pair" "this" {
-    key_name   = "${var.name_prefix}-key-${random_id.suffix.hex}"
-    public_key = tls_private_key.ssh.public_key_openssh
-  }
-
-  resource "local_file" "private_key" {
-    content         = tls_private_key.ssh.private_key_pem
-    filename        = "${path.module}/${var.name_prefix}-key.pem"
-    file_permission = "0400"
-  }
-
-  # ALWAYS attach the key pair to the instance:
-  resource "aws_instance" "this" {
-    key_name = aws_key_pair.this.key_name
-    ...
-  }
-
-  # ALWAYS add port 22 ingress to the security group and an SSH output:
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
-
-  output "ssh_command" {
-    value = "ssh -i ${var.name_prefix}-key.pem ec2-user@${aws_instance.this.public_ip}"
-  }
-
-NEW EC2 INSTANCE WITH SSH — when creating a fresh EC2 instance with a NEW security group:
-  Use a variable for the SSH CIDR with default "0.0.0.0/0" so the instance is reachable,
-  AND always emit an output block reminding the user to lock it down:
-
-  variable "allowed_ssh_cidr" {
-    description = "CIDR allowed to SSH. Default 0.0.0.0/0 works for demos — restrict to your IP (run: curl ifconfig.me) for production."
-    default     = "0.0.0.0/0"
-  }
-
-  # In the security group ingress rule:
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
-
-  # Always add this output so the user sees the security reminder in plan/apply output:
-  output "ssh_security_reminder" {
-    value = "SSH is open to ${var.allowed_ssh_cidr}. To restrict: set allowed_ssh_cidr=<your-ip>/32 (get your IP: curl ifconfig.me)"
-  }
-
-  203.0.113.45/32 is an RFC 5737 documentation-only IP that belongs to nobody — NEVER use it
-  for new EC2 instances because it will block all real SSH connections.
-
-MY IP / SPECIFIC IP RESTRICTION — ONLY when the user says "from my IP" or "my IP only"
-AND you are adding a rule to a PRE-EXISTING security group (not a newly created one):
-Use a variable with a documentation-range default so terraform plan succeeds AND the new
-rule is never a duplicate of the existing 0.0.0.0/0 rule already on that security group:
-  variable "allowed_ssh_cidr" {
-    description = "CIDR for SSH access. REPLACE with your actual IP before applying, e.g. 203.0.113.45/32"
-    default     = "203.0.113.45/32"
-  }
-Do NOT use default = "0.0.0.0/0" in this specific case — it duplicates the existing open
-rule on the pre-existing SG and causes AWS to reject the apply with "duplicate Security
-Group rule" errors. Use ${var.allowed_ssh_cidr} in the ingress rule.
-
-Additional rules:
-- Always include a provider "aws" {} block with a variable "region" (default = "us-east-1")
-- Use a variable "name_prefix" whose default is the explicit server/resource name from the user's request. A name is ONLY when the user writes something like "my-server", "prod-api", "mihirxtc-test-1", "fedoraisgreat" — a human-chosen identifier. Resource type descriptions such as "EC2 t3.micro", "S3 bucket with versioning", "VPC with public + private subnets", "IAM role for EC2" are NOT names. If the user provides no explicit name, always set default = "aca".
-- Use descriptive, lowercase resource labels (e.g. "main", "this")
-- Do NOT include backend configuration
-- Do NOT hardcode AWS credentials or account IDs
-- Keep the config minimal but complete and immediately usable
-- NEVER use data sources that query AWS at plan time (no data "aws_availability_zones",
-  data "aws_vpc", data "aws_subnets", data "aws_ami", etc.) — hardcode sensible defaults instead.
-  EXCEPTION — AMI IDs: ALWAYS use the SSM Parameter Store data source to fetch the latest
-  Amazon Linux 2023 AMI instead of hardcoding an AMI ID (hardcoded IDs get deregistered by AWS
-  and cause "couldn't find resource" errors on apply). Required pattern for every EC2 instance:
-
-    data "aws_ssm_parameter" "al2023_ami" {
-      name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
-    }
-
-    resource "aws_instance" "this" {
-      ami           = data.aws_ssm_parameter.al2023_ami.value
-      instance_type = "t3.micro"
-      ...
-    }
-
-  This data source is safe: terraform validate (run without credentials) skips it,
-  and terraform plan/apply (run with credentials) resolves it correctly.
-- For availability zones use literal strings: "${var.region}a" and "${var.region}b"
-- For EC2 security groups omit vpc_id to use the default VPC
-- For RDS: always create an aws_vpc + two aws_subnet resources (10.0.1.0/24 in <region>a,
-  10.0.2.0/24 in <region>b) and an aws_db_subnet_group referencing them inline
-- For VPC configs: hardcode CIDR blocks (10.0.0.0/16, subnets 10.0.x.0/24) and AZ literals
-- For IAM: use aws_iam_policy_document data source (it is local computation, not an AWS API call)
-- For S3 bucket names: AWS requires globally unique names — the random suffix is mandatory
-- For EBS storage: use root_block_device { volume_size = N, volume_type = "gp3" } inside the
-  aws_instance resource for the root volume. For additional volumes use aws_ebs_volume +
-  aws_volume_attachment.
-- EC2 OUTPUT ATTRIBUTE NAMES — CRITICAL: aws_instance exports these exact names:
-    public_ip        (NOT public_ip_address)
-    private_ip       (NOT private_ip_address)
-    public_dns       (NOT public_dns_name)
-    private_dns      (NOT private_dns_name)
-    id               (NOT instance_id)
-  Using wrong names causes "Unsupported attribute" errors from terraform validate.
-
-SECURITY GROUP RULE FIXES — CRITICAL:
-- `revoke_rules` is an argument on `aws_security_group` ONLY — NEVER place it inside
-  an `aws_security_group_rule` resource; it will cause "Unsupported argument" errors
-- To restrict SSH/port access on an existing security group: create a NEW
-  `aws_security_group_rule` resource with the restricted cidr_blocks and type = "ingress"
-- Never attempt to destroy or modify individual existing rules via Terraform without
-  first importing them — instead add the restrictive rule and note the open rule must
-  be removed manually
-- Correct pattern for SSH restriction fix:
-    resource "aws_security_group_rule" "restrict_ssh" {
-      type              = "ingress"
-      from_port         = 22
-      to_port           = 22
-      protocol          = "tcp"
-      cidr_blocks       = [var.allowed_ssh_cidr]   # must NOT be 0.0.0.0/0
-      security_group_id = "<existing-sg-id>"
-    }
-- The new rule CIDR must differ from the existing open rule — using 0.0.0.0/0 would
-  duplicate the existing rule and cause AWS to reject with "duplicate Security Group rule"
-- Always use the RFC 5737 TEST-NET default (203.0.113.45/32) FOR SECURITY GROUP FIXES
-  so plan + apply succeed; the user then replaces it with their real IP
-- IMPORTANT: 203.0.113.45/32 is ONLY correct here (fixing an existing SG). For new EC2
-  instances use 0.0.0.0/0 so the instance is actually reachable.
-
-EXISTING INFRASTRUCTURE AWARENESS — CRITICAL:
-When the user message contains an EXISTING_INFRA block, you MUST read it carefully and:
-1. If a suitable security group already exists, reference its ID as a literal string instead
-   of creating a new aws_security_group resource.
-   Example: vpc_security_group_ids = ["sg-0abc123def456789a"]
-2. If a VPC already exists, use its ID as a literal string for vpc_id instead of creating
-   a new aws_vpc.
-   Example: vpc_id = "vpc-0abc123def456789a"
-3. If subnets already exist in the right AZs, use their IDs as literal strings instead of
-   creating new aws_subnet resources.
-   Example: subnet_ids = ["subnet-0abc123", "subnet-0def456"]
-4. If an IAM role already exists for the needed purpose, reference it by ARN or name.
-5. NEVER create an S3 bucket with the same name as one listed in EXISTING_INFRA.
-6. Only create new resources when nothing suitable already exists.
-
-VPC COMPATIBILITY — CRITICAL when using EXISTING_INFRA:
-The subnet_id and every ID in vpc_security_group_ids MUST belong to the same VPC.
-Each entry in EXISTING_INFRA shows its vpc= field — always check they match before
-using them together. Mixing a subnet from vpc-AAA with a security group from vpc-BBB
-causes AWS to reject the RunInstances call with an opaque error.
-If no matching subnet exists in the same VPC as your chosen security group, omit
-subnet_id entirely and let AWS place the instance in the default subnet.\
+SYSTEM_PROMPT = """Generate only supported root Terraform resources: private S3 buckets with public-access-block,
+versioning and AES256 encryption companions; VPCs, private subnets, security groups, EC2, AWS key pairs,
+random_id and tls_private_key.ssh (RSA 4096). Provider versions are pinned by the runner:
+aws=5.100.0 random=3.7.2 tls=4.1.0; Terraform=1.17.1. No local provider, provisioners, data sources,
+modules, imports, IAM, RDS, user_data, external programs or file-reading functions.
+Use a random suffix for unique names. Do not set ACAWorkspace tags: the runner owns those.
+S3 force_destroy=false; all four public-access flags=true; versioning=Enabled; encryption=AES256.
+Every bucket must have all three companion resources referencing that bucket directly.
+EC2: only server-approved literal AMI IDs (ask for configuration if none supplied), instance types
+ t3/t4g nano/micro/small, associate_public_ip_address=false, metadata_options.http_tokens=required,
+root_block_device.encrypted=true and volume_size between 8 and 30 GiB. Subnets must set
+map_public_ip_on_launch=false. Reference resources defined in this config, or IDs explicitly
+listed as server-authorized targets. Inventory IDs alone are not authorization. No implicit/default VPC, subnet or security group.
+Security group rules: explicit TCP ports and CIDRs; world-open rules only single port 80 or 443;
+administrative CIDRs must be explicitly server-authorized. Set ingress=[] and egress=[] when unused.
+If an SSH key is needed, create tls_private_key.ssh { algorithm=RSA rsa_bits=4096 } and an aws_key_pair;
+do not write a file or output private key material. The runner exports a fixed SSH key artifact.
+Return unsupported requests as a clear explanation rather than pretending they are executable.
 """
 
 
 def validate_terraform_syntax(hcl: str) -> dict:
-    """Run terraform init and terraform validate in a temp directory; return {"valid": bool, "message": str}."""
+    """Parse and check static policy only; provider/plan checks run in isolated jobs."""
+    from runner.policy import validate_source
     try:
-        validate_aws_configuration(hcl)
-    except AWSIdentityError as error:
-        return {"valid": False, "message": str(error)}
-
-    # Pass the shared plugin cache so providers are reused across validate calls
-    # instead of being re-downloaded from scratch on every invocation.
-    _PLUGIN_CACHE_DIR.mkdir(exist_ok=True)
-    cache_env = os.environ.copy()
-    cache_env["TF_PLUGIN_CACHE_DIR"] = str(_PLUGIN_CACHE_DIR)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tf_path = os.path.join(tmpdir, "main.tf")
-        with open(tf_path, "w") as f:
-            f.write(hcl)
-
-        init = subprocess.run(
-            ["terraform", "init", "-backend=false", "-no-color"],
-            cwd=tmpdir,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=cache_env,
-        )
-        if init.returncode != 0:
-            return {
-                "valid": False,
-                "message": f"Init failed: {(init.stderr or init.stdout).strip()}",
-            }
-
-        validate = subprocess.run(
-            ["terraform", "validate", "-no-color"],
-            cwd=tmpdir,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=cache_env,
-        )
-        if validate.returncode == 0:
-            return {"valid": True, "message": "Terraform configuration is valid."}
-
-        return {
-            "valid": False,
-            "message": (validate.stderr or validate.stdout).strip(),
-        }
+        validate_source(hcl, None)
+        return {"valid": True, "message": "Static HCL/policy checks passed; isolated planning is still required."}
+    except Exception as error:
+        return {"valid": False, "message": str(error) if isinstance(error, ValueError) else "HCL policy validation failed"}
 
 
 async def generate_terraform_with_anthropic(request: str, api_key: str, existing_infra: str = "", validation_error: str = "") -> dict:

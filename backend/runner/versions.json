@@ -1,0 +1,6 @@
+{
+  "terraform": {"version": "1.17.1", "amd64": "4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061", "arm64": "988e950a1c23058093b0e66ab2d5fb53fc18345ecfbd5871acf51dbac9325edd"},
+  "aws": {"version": "5.100.0", "amd64": "1589a2266af699cbd5d80737a0fe02e54ec9cf2ca54e7e00ac51c7359056f274", "arm64": "6330766f1d85f01ae6ea90d1b214b8b74cc8c1badc4696b165b36ddd4cc15f7b"},
+  "random": {"version": "3.7.2", "amd64": "7b8434212eef0f8c83f5a90c6d76feaf850f6502b61b53c329e85b3b281cba34", "arm64": "dc76e4326aec2490c1600d6871a95e78f9050f9ce427c71707ea412a2f2f1a62"},
+  "tls": {"version": "4.1.0", "amd64": "2fb9fe7a8b5afdbd3e903acb6776ef1be3f2e587fb236a8c60f11a9fa165faa8", "arm64": "35b5dc95bc75f0b3b9c5ce54d4d7600c1ebc96fbb8dfca174536e8bf103c8cdc"}
+}

@@ -26,3 +26,9 @@ test.py
 
 # IDE
 .vscode
+
+runner/config.json
+
+terraform_plugin_cache
+.terraform
+**/__pycache__

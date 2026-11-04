@@ -1,0 +1,8 @@
+{
+  "resource_policy": {
+    "authorized_targets": {},
+    "allowed_amis": [],
+    "admin_cidrs": []
+  },
+  "state_backend": null
+}

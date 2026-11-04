@@ -54,9 +54,9 @@ class ExecutionStore:
             with self._connection() as connection:
                 os.chmod(self.path, 0o600)
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3):
+                if version not in (0, 1, 2, 3, 4):
                     raise RuntimeError("Unsupported application database schema")
-                if version in (1, 2):
+                if version in (1, 2, 3):
                     backups = self.data_dir / "backups"
                     backups.mkdir(exist_ok=True, mode=0o700)
                     backup = backups / f"schema-v{version}-{uuid.uuid4().hex}.sqlite3"
@@ -84,7 +84,10 @@ class ExecutionStore:
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS scans (scan_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
                 )
-                connection.execute("PRAGMA user_version = 3")
+                connection.execute("CREATE TABLE IF NOT EXISTS action_requests (request_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, execution_id TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS action_locks (lock_key TEXT PRIMARY KEY, execution_id TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS action_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, execution_id TEXT NOT NULL, payload TEXT NOT NULL)")
+                connection.execute("PRAGMA user_version = 4")
                 if not connection.execute(
                     "SELECT 1 FROM metadata WHERE key = 'legacy_history_imported'"
                 ).fetchone():
@@ -152,12 +155,126 @@ class ExecutionStore:
             if row is None:
                 raise KeyError("Execution does not exist")
             entry = json.loads(row[0])
+            if entry.get("approval_digest") and set(updates) - {"resolved", "resolved_at"}:
+                raise ValueError("Reviewed actions must use transactional action transitions")
             entry.update(updates)
             connection.execute(
                 "UPDATE executions SET payload = ? WHERE execution_id = ?",
                 (json.dumps(entry, default=str), execution_id),
             )
             connection.commit()
+
+    @staticmethod
+    def _action_event(connection, entry, previous):
+        from services.action_identity import actor
+        event = {"from": previous, "to": entry["status"], "at": datetime.now(timezone.utc).isoformat(),
+                 "actor": actor.get(), "approval_digest": entry.get("approval_digest")}
+        connection.execute("INSERT INTO action_events (execution_id, payload) VALUES (?, ?)",
+                           (entry["execution_id"], json.dumps(event)))
+
+    @staticmethod
+    def _save_action(connection, entry, previous):
+        connection.execute("UPDATE executions SET payload = ? WHERE execution_id = ?",
+                           (json.dumps(entry), entry["execution_id"]))
+        ExecutionStore._action_event(connection, entry, previous)
+
+    @staticmethod
+    def _lock_action(connection, entry):
+        key = entry["lock_key"]
+        current = connection.execute("SELECT execution_id FROM action_locks WHERE lock_key = ?", (key,)).fetchone()
+        if current and current[0] != entry["execution_id"]:
+            raise ValueError("Another pending or uncertain action owns this target; review its history first")
+        connection.execute("INSERT OR IGNORE INTO action_locks VALUES (?, ?)", (key, entry["execution_id"]))
+
+    def create_action(self, entry, request_key="", request_hash="", reserve=False):
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if request_key:
+                old = connection.execute("SELECT request_hash, execution_id FROM action_requests WHERE request_key = ?", (request_key,)).fetchone()
+                if old:
+                    if old[0] != request_hash:
+                        raise ValueError("Idempotency key was already used for a different request")
+                    row = connection.execute("SELECT payload FROM executions WHERE execution_id = ?", (old[1],)).fetchone()
+                    return json.loads(row[0]), False
+            if reserve:
+                self._lock_action(connection, entry)
+            connection.execute("INSERT INTO executions VALUES (?, ?)", (entry["execution_id"], json.dumps(entry)))
+            if request_key:
+                connection.execute("INSERT INTO action_requests VALUES (?, ?, ?)", (request_key, request_hash, entry["execution_id"]))
+            self._action_event(connection, entry, None)
+            connection.commit()
+        return entry, True
+
+    def prepare_action(self, execution_id, updates):
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT payload FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()
+            if not row:
+                raise KeyError("Execution does not exist")
+            entry = json.loads(row[0])
+            if entry["status"] != "planning":
+                raise ValueError("Only a planning action can be prepared")
+            entry.update(updates)
+            self._save_action(connection, entry, "planning")
+            if entry["status"] == "plan_failed":
+                connection.execute("DELETE FROM action_locks WHERE execution_id = ?", (execution_id,))
+            connection.commit()
+        return entry
+
+    def claim_action(self, execution_id, approved, digest, request_key, request_hash):
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            old = connection.execute("SELECT request_hash, execution_id FROM action_requests WHERE request_key = ?", (request_key,)).fetchone()
+            if old:
+                if old != (request_hash, execution_id):
+                    raise ValueError("Idempotency key was already used for a different request")
+                row = connection.execute("SELECT payload FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()
+                return json.loads(row[0]), False
+            row = connection.execute("SELECT payload FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()
+            if not row:
+                raise KeyError("Execution does not exist")
+            entry = json.loads(row[0])
+            if entry.get("status") != "awaiting_approval":
+                raise ValueError("Action is not awaiting approval; do not retry mutations automatically")
+            if approved and (not entry.get("approval_digest") or entry["approval_digest"] != digest):
+                raise ValueError("Approval must match the reviewed digest; legacy actions require a new proposal")
+            if approved:
+                self._lock_action(connection, entry)
+            entry.update(status="applying" if approved else "rejected", decision_key=request_key,
+                         approved_at=datetime.now(timezone.utc).isoformat() if approved else None)
+            connection.execute("INSERT INTO action_requests VALUES (?, ?, ?)", (request_key, request_hash, execution_id))
+            self._save_action(connection, entry, "awaiting_approval")
+            if not approved:
+                connection.execute("DELETE FROM action_locks WHERE execution_id = ?", (execution_id,))
+            connection.commit()
+        return entry, True
+
+    def finish_action(self, execution_id, status, updates):
+        if status not in ("complete", "failed", "uncertain", "invalidated"):
+            raise ValueError("Invalid final action state")
+        self.initialize()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT payload FROM executions WHERE execution_id = ?", (execution_id,)).fetchone()
+            entry = json.loads(row[0])
+            if entry["status"] != "applying":
+                raise ValueError("Action was not claimed")
+            entry.update(updates, status=status, finished_at=datetime.now(timezone.utc).isoformat())
+            self._save_action(connection, entry, "applying")
+            # Failed remote mutations may have partial effects: keep the target locked.
+            if status in ("complete", "invalidated"):
+                connection.execute("DELETE FROM action_locks WHERE execution_id = ?", (execution_id,))
+            connection.commit()
+        return entry
+
+    def action_events(self, execution_id):
+        self.initialize()
+        with self._connection() as connection:
+            return [json.loads(row[0]) for row in connection.execute(
+                "SELECT payload FROM action_events WHERE execution_id = ? ORDER BY sequence", (execution_id,))]
 
     def history(self) -> list:
         self.initialize()
@@ -177,7 +294,9 @@ class ExecutionStore:
         """Retain identity/coverage evidence, not raw inventory or credentials."""
         self.initialize()
         scan_id = "scan_" + uuid.uuid4().hex
+        from services.scan_coverage import scan_coverage
         record = {"scan_id": scan_id, "aws_identity": identity,
+                  "coverage": scan_coverage(services),
                   "service_statuses": {name: data.get("status", "error") for name, data in services.items()}}
         with self._connection() as connection:
             connection.execute("INSERT INTO scans VALUES (?, ?)", (scan_id, json.dumps(record)))

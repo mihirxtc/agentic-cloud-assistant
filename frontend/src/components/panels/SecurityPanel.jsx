@@ -3,24 +3,28 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { CHART_COLORS } from '../../utils/constants'
 import DarkTooltip from '../ui/DarkTooltip'
 
+import ActionReview from '../ui/ActionReview'
+import ScanCoverage from '../ui/ScanCoverage'
+
 const DIRECT_FIX_RULES = new Set(['SSH_PORT_OPEN', 'RDP_PORT_OPEN'])
 
 export default function SecurityPanel({ data, loading, onScan, onFix, onDirectFix }) {
+  const [proposal, setProposal] = useState(null)
   const [open,            setOpen]            = useState(null)
   const [directFixStatus, setDirectFixStatus] = useState({})
 
   const counts = useMemo(() => {
     if (!data) return null
     const c = { HIGH: 0, MEDIUM: 0, LOW: 0 }
-    data.findings.forEach((f) => { c[f.severity] = (c[f.severity] || 0) + 1 })
+    for (const f of data.findings || []) c[f.severity] = (c[f.severity] || 0) + 1
     return c
   }, [data])
 
   const handleDirectFix = async (f) => {
     setDirectFixStatus(s => ({ ...s, [f.finding_id]: 'fixing' }))
     try {
-      await onDirectFix(f)
-      setDirectFixStatus(s => ({ ...s, [f.finding_id]: 'done' }))
+      setProposal(await onDirectFix(f))
+      setDirectFixStatus(s => ({ ...s, [f.finding_id]: 'review' }))
     } catch (e) {
       setDirectFixStatus(s => ({ ...s, [f.finding_id]: 'error:' + e.message }))
     }
@@ -33,7 +37,7 @@ export default function SecurityPanel({ data, loading, onScan, onFix, onDirectFi
   ] : []
 
   const sorted = data
-    ? [...data.findings].sort((a, b) =>
+    ? [...(data.findings || [])].sort((a, b) =>
         ['HIGH','MEDIUM','LOW'].indexOf(a.severity) - ['HIGH','MEDIUM','LOW'].indexOf(b.severity))
     : []
 
@@ -73,7 +77,7 @@ export default function SecurityPanel({ data, loading, onScan, onFix, onDirectFi
                   position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
                   alignItems: 'center', justifyContent: 'center', pointerEvents: 'none',
                 }}>
-                  <div className="mono" style={{ fontSize: 20, color: 'var(--text-primary)' }}>{data.findings.length}</div>
+                  <div className="mono" style={{ fontSize: 20, color: 'var(--text-primary)' }}>{data.findings?.length ?? 0}</div>
                   <div style={{ fontSize: 9, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
                     findings
                   </div>
@@ -81,6 +85,8 @@ export default function SecurityPanel({ data, loading, onScan, onFix, onDirectFi
               </div>
             </div>
 
+            <ScanCoverage data={data} />
+            {proposal && <ActionReview key={proposal.execution_id} proposal={proposal} onComplete={() => { setProposal(null); onScan() }} onClose={() => setProposal(null)} />}
             <div className="aca-summary">{data.llm_summary}</div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -140,7 +146,7 @@ export default function SecurityPanel({ data, loading, onScan, onFix, onDirectFi
                                   disabled={directFixStatus[f.finding_id] === 'fixing'}
                                   onClick={() => handleDirectFix(f)}
                                 >
-                                  {directFixStatus[f.finding_id] === 'fixing' ? '…Revoking' : '⚡ Direct Fix'}
+                                  {directFixStatus[f.finding_id] === 'fixing' ? 'Preparing…' : 'Review Direct Fix'}
                                 </button>
                               )}
                             </>

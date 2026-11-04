@@ -1,3 +1,7 @@
+import ActionReview from '../ui/ActionReview'
+import { decisionArgs, actionMessage } from '../../utils/approval'
+import ScanCoverage from '../ui/ScanCoverage'
+import { verificationMessage } from '../../utils/assessment'
 import { useState, useEffect } from 'react'
 import { callTool } from '../../api/mcpClient'
 import { AGENT_STEPS } from '../../utils/constants'
@@ -10,6 +14,11 @@ function PhasePill({ phase }) {
     applying:           ['blue',    'APPLYING'],
     complete:           ['success', 'COMPLETE'],
     failed:             ['error',   'FAILED'],
+    incomplete:         ['warning', 'INCOMPLETE'],
+    uncertain:          ['warning', 'OUTCOME UNCERTAIN'],
+    invalidated:        ['warning', 'NEW REVIEW REQUIRED'],
+    rejected:           ['muted', 'REJECTED'],
+    no_issues:          ['muted', 'CHECKS COMPLETED'],
   }
   const [cls, label] = map[phase] || map.idle
   return <span className={'aca-badge ' + cls}>{label}</span>
@@ -38,6 +47,8 @@ function AgentPhaseSteps({ step, done = false }) {
 }
 
 export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
+  const [destroyProposal, setDestroyProposal] = useState(null)
+  const [decisionKey] = useState(() => crypto.randomUUID())
   const [phase,        setPhase]        = useState('idle')
   const [step,         setStep]         = useState(0)
   const [data,         setData]         = useState(null)
@@ -64,7 +75,9 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
         region, model,
       })
       setData(r)
-      setPhase(r.status === 'awaiting_approval' ? 'awaiting_approval' : 'idle')
+      if (r.status === 'awaiting_approval') setPhase('awaiting_approval')
+      else if (['partial', 'failed', 'no_issues'].includes(r.status)) setPhase(r.status === 'no_issues' ? 'no_issues' : 'incomplete')
+      else { setError(r.error || 'Agent did not produce a plan'); setPhase('failed') }
     } catch (e) { setError(String(e)); setPhase('failed') }
   }
 
@@ -72,15 +85,15 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
     setPhase('applying'); setStep(0)
     try {
       const r = await callTool('agent_approve', {
-        execution_id: data.execution_id, approved: true,
+        ...decisionArgs(data, true, decisionKey),
         aws_region:            region        || 'us-east-1',
       })
       setResult(r)
-      const finalPhase = r.status === 'complete' ? 'complete' : 'failed'
+      const finalPhase = ['complete', 'applying', 'uncertain', 'invalidated', 'rejected', 'failed'].includes(r.status) ? r.status : 'failed'
       setPhase(finalPhase)
       if (finalPhase === 'complete') onApplyComplete?.()
-      else setError(r.error || 'Apply failed')
-    } catch (e) { setError(String(e)); setPhase('failed') }
+      else setError(actionMessage(r))
+    } catch (e) { setError(`${e.message}. ${actionMessage({ status: 'uncertain' })}`); setPhase('uncertain') }
   }
 
   const downloadReport = () => {
@@ -111,15 +124,15 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
   }
 
   const rollback = async () => {
-    if (!window.confirm('This will destroy the AWS resources just created. Are you sure?')) return
     setRollingBack(true)
     try {
-      await callTool('rollback_execution', {
+      const proposal = await callTool('rollback_execution', {
+        idempotency_key: crypto.randomUUID(),
         execution_id:          data.execution_id,
         aws_region:            region || 'us-east-1',
       })
-      setRollbackDone(true)
-    } catch { /* silent */ }
+      setDestroyProposal(proposal)
+    } catch (error) { setError(error.message) }
     finally { setRollingBack(false) }
   }
 
@@ -128,17 +141,19 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
     setVerifyResult(null)
     try {
       const r = await callTool('run_security_analysis_with_summary', { model, region: region || 'us-east-1' })
-      setVerifyResult({ count: r.total_findings })
-    } catch { /* silent */ }
+      setVerifyResult(r)
+    } catch { setVerifyResult({ status: 'failed' }) }
     finally { setVerifying(false) }
   }
 
-  const reject = () => {
-    callTool('agent_approve', {
-      execution_id: data.execution_id, approved: false,
-      aws_region:            region        || 'us-east-1',
-    }).catch(() => {})
-    setPhase('idle'); setData(null)
+  const reject = async () => {
+    try {
+      const result = await callTool('agent_approve', {
+        ...decisionArgs(data, false, decisionKey + '-reject'), aws_region: region || 'us-east-1',
+      })
+      setPhase(result.status)
+      setError(actionMessage(result))
+    } catch (error) { setError(error.message) }
   }
 
   return (
@@ -150,6 +165,18 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
         </div>
       </div>
       <div className="aca-panel-body">
+        {destroyProposal && <ActionReview key={destroyProposal.execution_id} proposal={destroyProposal} onClose={() => setDestroyProposal(null)} onComplete={() => { setRollbackDone(true); onApplyComplete?.() }} />}
+        {data?.approval_digest && phase === 'awaiting_approval' && <div className="aca-summary">
+          {data.action_type} · AWS {data.aws_identity?.account_id} · {data.aws_identity?.region}
+          <div className="mono" style={{ overflowWrap: 'anywhere' }}>Approval digest: {data.approval_digest}</div>
+        </div>}
+        {['incomplete', 'no_issues'].includes(phase) && (
+          <div>
+            <ScanCoverage data={data} />
+            <p>{data?.message || data?.llm_summary}</p>
+            <button className="aca-btn-primary" onClick={run}>Run Agent Again</button>
+          </div>
+        )}
         {phase === 'idle' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.55, maxWidth: 640 }}>
@@ -254,10 +281,10 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
                   ✓ Mark Resolved
                 </button>
               )}
-              {!rollbackDone && (
+              {!rollbackDone && data?.action_type === 'terraform_apply' && (
                 <button className="aca-btn-ghost small" onClick={rollback} disabled={rollingBack}
                   style={{ color: 'var(--error)' }}>
-                  {rollingBack ? '…Rolling back' : '↩ Rollback'}
+                  {rollingBack ? 'Preparing destroy plan…' : 'Review destroy plan'}
                 </button>
               )}
               <button className="aca-btn-ghost small"
@@ -278,34 +305,32 @@ export default function SecurityAgentPanel({ region, model, onApplyComplete }) {
                 background: 'var(--warning-dim)', border: '1px solid var(--warning)',
                 borderRadius: 6, padding: '8px 14px', fontSize: 12, color: 'var(--warning)',
               }}>
-                ↩ Rollback complete — created resources have been destroyed.
+                ↩ Reviewed destroy action completed.
               </div>
             )}
             {verifyResult && (
               <div style={{
-                background: verifyResult.count === 0 ? 'var(--success-dim)' : 'var(--warning-dim)',
-                border:     `1px solid ${verifyResult.count === 0 ? 'var(--success)' : 'var(--warning)'}`,
+                background: 'var(--warning-dim)',
+                border:     '1px solid var(--warning)',
                 borderRadius: 6, padding: '8px 14px', fontSize: 12,
-                color: verifyResult.count === 0 ? 'var(--success)' : 'var(--warning)',
+                color: 'var(--warning)',
               }}>
-                {verifyResult.count === 0
-                  ? '✓ Re-scan complete — 0 security issues found. Fix confirmed.'
-                  : `⚠ Re-scan found ${verifyResult.count} remaining issue(s). Review the Security panel.`}
+                {verificationMessage(verifyResult)}
               </div>
             )}
           </div>
         )}
 
-        {phase === 'failed' && (
+        {['failed', 'uncertain', 'invalidated', 'rejected'].includes(phase) && (
           <div style={{
             background: 'var(--error-dim)', border: '1px solid var(--error)',
             borderRadius: 8, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
           }}>
             <div className="aca-row" style={{ gap: 10 }}>
-              <span className="aca-badge error">✗ FAILED</span>
+              <PhasePill phase={phase} />
               <span style={{ color: 'var(--text-primary)', fontSize: 13 }}>{error || 'Agent failed'}</span>
             </div>
-            <div><button className="aca-btn-ghost small" onClick={run}>Retry</button></div>
+            {phase !== 'uncertain' && <div><button className="aca-btn-ghost small" onClick={run}>Start a new assessment</button></div>}
           </div>
         )}
       </div>

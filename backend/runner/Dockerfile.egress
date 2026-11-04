@@ -1,0 +1,6 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /opt/aca
+COPY runner/egress.py ./egress.py
+USER 10001:10001
+CMD ["python", "egress.py"]

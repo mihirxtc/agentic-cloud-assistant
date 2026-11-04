@@ -41,3 +41,23 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  terraform-isolation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --require-hashes -r requirements-runner.txt
+      - run: docker build -f runner/Dockerfile.job -t aca-terraform-job:ci .
+      - run: docker build -f runner/Dockerfile.runner -t aca-terraform-runner:ci .
+      - run: docker build -f runner/Dockerfile.egress -t aca-terraform-egress:ci .
+      - run: docker run --rm --network=none --entrypoint docker aca-terraform-runner:ci --version
+      - name: Verify non-root dummy job isolation without AWS credentials
+        run: |
+          job_image_id=$(docker image inspect aca-terraform-job:ci --format '{{.Id}}')
+          python -m runner.smoke --image "$job_image_id"

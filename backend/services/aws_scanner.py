@@ -1,450 +1,217 @@
+"""AWS inventory with explicit collection coverage and unknown detail values."""
 import concurrent.futures
-from collections import defaultdict
-from functools import partial
+from functools import partial, wraps
+from datetime import datetime, timezone
 
 from services.aws_connection import get_connection
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import ClientError
 
 
-def scan_ec2(region: str = "") -> dict:
-    """Scan all EC2 instances in the given region and return their metadata."""
+def _error(error):
+    # Do not echo SDK messages, request parameters or credentials into responses.
+    code = error.response.get("Error", {}).get("Code", "AWSAPIError") if isinstance(error, ClientError) else type(error).__name__
+    return {"code": code, "message": "AWS inspection failed; check permissions and retry."}
 
+
+def _pages(client, operation, key, **kwargs):
+    items, errors = [], []
     try:
-        ec2_client = (
-            get_connection(region).client("ec2", region_name=region)
-        )
-
-        paginator = ec2_client.get_paginator("describe_instances")
-        pages = paginator.paginate(
-            Filters=[{
-                "Name":   "instance-state-name",
-                "Values": ["pending", "running", "stopping", "stopped"],
-            }]
-        )
-
-        instances = []
-
-        for page in pages:
-            for reservation in page.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    name = ""
-                    for tag in instance.get("Tags", []):
-                        if tag.get("Key") == "Name":
-                            name = tag.get("Value", "")
-                            break
-
-                    security_group_ids = []
-                    for sg in instance.get("SecurityGroups", []):
-                        group_id = sg.get("GroupId")
-                        if group_id:
-                            security_group_ids.append(group_id)
-
-                    launch_time_raw = instance.get("LaunchTime")
-                    launch_time = str(launch_time_raw) if launch_time_raw else "Unknown"
-
-                    instances.append(
-                        {
-                            "id": instance.get("InstanceId", ""),
-                            "name": name,
-                            "type": instance.get("InstanceType", ""),
-                            "state": instance.get("State", {}).get("Name", ""),
-                            "public_ip": instance.get("PublicIpAddress"),
-                            "private_ip": instance.get("PrivateIpAddress"),
-                            "launch_time": launch_time,
-                            "security_group_ids": security_group_ids,
-                        }
-                    )
-
-        return {
-            "status": "ok",
-            "count": len(instances),
-            "instances": instances,
-        }
-
-    except NoCredentialsError:
-        return {
-            "status": "error",
-            "error": "AWS credentials not found. Run 'aws configure' to set them up.",
-            "count": 0,
-            "instances": [],
-        }
-    except ClientError as error:
-        return {
-            "status": "error",
-            "error": f"AWS API error: {error.response.get('Error', {}).get('Message', str(error))}",
-            "count": 0,
-            "instances": [],
-        }
+        for page in client.get_paginator(operation).paginate(**kwargs):
+            items.extend(page[key])
     except Exception as error:
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(error)}",
-            "count": 0,
-            "instances": [],
-        }
+        errors.append({"operation": operation, **_error(error)})
+    return items, errors
 
 
-def scan_s3() -> dict:
-    """Scan all S3 buckets and determine public-access status via BPA settings then ACL."""
+def _result(key, items, errors, inventory_complete=True):
+    state = "complete" if not errors else "partial" if items or inventory_complete else "failed"
+    return {"status": {"complete": "ok", "partial": "partial", "failed": "error"}[state],
+            "coverage": state, "inventory_complete": inventory_complete,
+            "errors": errors, "error": "Some AWS inspections failed" if errors else None,
+            "user_count" if key == "users" else "count": len(items), key: items}
 
-    ALL_USERS_URI = "http://acs.amazonaws.com/groups/global/AllUsers"
 
-    try:
-        s3_client = (
-            get_connection().client("s3")
-        )
-
-        response = s3_client.list_buckets()
-
-        buckets = []
-
-        for bucket in response.get("Buckets", []):
-            bucket_name = bucket.get("Name", "")
-            created_raw = bucket.get("CreationDate")
-            created = str(created_raw) if created_raw else "Unknown"
-
-            # --- Step 1: Block Public Access settings ---
-            # IgnorePublicAcls=True means any AllUsers ACL grants are silently
-            # ignored by S3, so the bucket is NOT publicly accessible via ACL.
-            bpa_ignores_acls = False
+def _scan(key):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            started = datetime.now(timezone.utc).isoformat()
             try:
-                bpa = s3_client.get_public_access_block(Bucket=bucket_name)
-                cfg = bpa.get("PublicAccessBlockConfiguration", {})
-                bpa_ignores_acls = cfg.get("IgnorePublicAcls", False)
-                block_public_access = (
-                    cfg.get("BlockPublicAcls", False)
-                    and cfg.get("IgnorePublicAcls", False)
-                    and cfg.get("BlockPublicPolicy", False)
-                    and cfg.get("RestrictPublicBuckets", False)
-                )
-            except ClientError as bpa_err:
-                code = bpa_err.response.get("Error", {}).get("Code", "")
-                if code == "NoSuchPublicAccessBlockConfiguration":
-                    # No BPA config set — account default applies (no block)
-                    block_public_access = False
-                else:
-                    block_public_access = False
+                result = function(*args, **kwargs)
+            except Exception as error:
+                result = _result(key, [], [_error(error)], False)
+            return {**result, "started_at": started, "completed_at": datetime.now(timezone.utc).isoformat()}
+        return wrapped
+    return decorate
 
-            # --- Step 2: ACL check (only meaningful when BPA does not override) ---
-            is_public = False
-            if not bpa_ignores_acls:
-                try:
-                    acl_response = s3_client.get_bucket_acl(Bucket=bucket_name)
-                    for grant in acl_response.get("Grants", []):
-                        grantee = grant.get("Grantee", {})
-                        if grantee.get("URI") == ALL_USERS_URI:
-                            is_public = True
-                            break
-                except Exception:
-                    is_public = False
 
-            buckets.append(
-                {
-                    "name": bucket_name,
-                    "created": created,
-                    "is_public": is_public,
-                    "block_public_access": block_public_access,
-                }
-            )
+@_scan("instances")
+def scan_ec2(region: str = "") -> dict:
+    client = get_connection(region).client("ec2", region_name=region)
+    raw, errors = _pages(client, "describe_instances", "Reservations", Filters=[{
+        "Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]}])
+    instances = [{"id": item.get("InstanceId", ""),
+                  "name": next((t["Value"] for t in item.get("Tags", []) if t["Key"] == "Name"), ""),
+                  "type": item.get("InstanceType", ""), "state": item.get("State", {}).get("Name", ""),
+                  "public_ip": item.get("PublicIpAddress"), "private_ip": item.get("PrivateIpAddress"),
+                  "launch_time": str(item.get("LaunchTime", "Unknown")),
+                  "security_group_ids": [sg["GroupId"] for sg in item.get("SecurityGroups", [])]}
+                 for reservation in raw for item in reservation.get("Instances", [])]
+    return _result("instances", instances, errors, not errors)
 
-        return {
-            "status": "ok",
-            "count": len(buckets),
-            "buckets": buckets,
-        }
 
-    except NoCredentialsError:
-        return {
-            "status": "error",
-            "error": "AWS credentials not found. Run 'aws configure' to set them up.",
-            "count": 0,
-            "buckets": [],
-        }
+def _public_block(client, operation, **kwargs):
+    try:
+        return getattr(client, operation)(**kwargs)["PublicAccessBlockConfiguration"], None
     except ClientError as error:
-        return {
-            "status": "error",
-            "error": f"AWS API error: {error.response.get('Error', {}).get('Message', str(error))}",
-            "count": 0,
-            "buckets": [],
-        }
+        if error.response.get("Error", {}).get("Code") in ("NoSuchPublicAccessBlockConfiguration", "NoSuchPublicAccessBlock"):
+            return {}, None
+        return None, _error(error)
     except Exception as error:
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(error)}",
-            "count": 0,
-            "buckets": [],
-        }
+        return None, _error(error)
+
+
+def _effective_flag(bucket, account, key):
+    if any(config is not None and config.get(key) is True for config in (bucket, account)):
+        return True
+    return False if bucket is not None and account is not None else None
+
+
+@_scan("buckets")
+def scan_s3() -> dict:
+    """Inspect bucket ACL/policy configuration; object ACLs/access points are outside scope."""
+    connection = get_connection()
+    client = connection.client("s3")
+    raw, errors = _pages(client, "list_buckets", "Buckets")
+    inventory_complete = not errors
+    account_block, account_error = _public_block(connection.client("s3control"), "get_public_access_block", AccountId=connection.account_id)
+    if account_error:
+        errors.append({"operation": "get_account_public_access_block", **account_error})
+    buckets = []
+    for item in raw:
+        name = item["Name"]
+        detail_errors = []
+        block, error = _public_block(client, "get_public_access_block", Bucket=name)
+        if error:
+            detail_errors.append({"operation": "get_public_access_block", **error})
+        acl_public = policy_public = None
+        try:
+            grants = client.get_bucket_acl(Bucket=name)["Grants"]
+            acl_public = any(g.get("Grantee", {}).get("URI") in (
+                "http://acs.amazonaws.com/groups/global/AllUsers",
+                "http://acs.amazonaws.com/groups/global/AuthenticatedUsers") for g in grants)
+        except Exception as error:
+            detail_errors.append({"operation": "get_bucket_acl", **_error(error)})
+        try:
+            policy_public = client.get_bucket_policy_status(Bucket=name)["PolicyStatus"]["IsPublic"]
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "NoSuchBucketPolicy":
+                policy_public = False
+            else:
+                detail_errors.append({"operation": "get_bucket_policy_status", **_error(error)})
+        except Exception as error:
+            detail_errors.append({"operation": "get_bucket_policy_status", **_error(error)})
+        ignore_acl = _effective_flag(block, account_block, "IgnorePublicAcls")
+        restrict_policy = _effective_flag(block, account_block, "RestrictPublicBuckets")
+        acl_exposed = False if ignore_acl is True or acl_public is False else True if ignore_acl is False and acl_public is True else None
+        policy_exposed = False if restrict_policy is True or policy_public is False else True if restrict_policy is False and policy_public is True else None
+        is_public = True if True in (acl_exposed, policy_exposed) else False if acl_exposed is False and policy_exposed is False else None
+        flags = [_effective_flag(block, account_block, flag) for flag in (
+            "BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")]
+        all_blocked = False if False in flags else True if all(f is True for f in flags) else None
+        buckets.append({"name": name, "created": str(item.get("CreationDate", "Unknown")),
+                        "is_public": is_public, "block_public_access": all_blocked,
+                        "acl_public": acl_public, "policy_public": policy_public,
+                        "public_access_status": "unknown" if is_public is None else "public" if is_public else "not_public",
+                        "errors": detail_errors, "coverage": "partial" if detail_errors or account_error else "complete"})
+        errors.extend({"resource_id": name, **error} for error in detail_errors)
+    result = _result("buckets", buckets, errors, inventory_complete)
+    result["scope"] = "Bucket ACLs/policies and bucket/account public-access blocks only. Object ACLs, access points and organization controls are not assessed; public grants do not prove anonymous object readability."
+    return result
 
 
 def _fetch_user_details(iam_client, user: dict) -> dict:
-    """Fetch all per-user IAM detail calls for a single user. boto3 clients are thread-safe, so sharing one client across threads is correct."""
-    username = user.get("UserName", "")
-
-    has_mfa = False
-    try:
-        mfa_response = iam_client.list_mfa_devices(UserName=username)
-        has_mfa = len(mfa_response.get("MFADevices", [])) > 0
-    except Exception:
-        pass
-
-    attached_policies = []
-    try:
-        pol = iam_client.list_attached_user_policies(UserName=username)
-        attached_policies = [
-            {"name": p["PolicyName"], "arn": p["PolicyArn"]}
-            for p in pol.get("AttachedPolicies", [])
-        ]
-    except Exception:
-        pass
-
-    inline_policies = []
-    try:
-        inline = iam_client.list_user_policies(UserName=username)
-        inline_policies = inline.get("PolicyNames", [])
-    except Exception:
-        pass
-
-    groups = []
-    try:
-        grp = iam_client.list_groups_for_user(UserName=username)
-        groups = [g["GroupName"] for g in grp.get("Groups", [])]
-    except Exception:
-        pass
-
-    access_keys = []
-    try:
-        keys = iam_client.list_access_keys(UserName=username)
-        for k in keys.get("AccessKeyMetadata", []):
-            key_id = k["AccessKeyId"]
-            last_used = "Never"
-            try:
-                lu = iam_client.get_access_key_last_used(AccessKeyId=key_id)
-                lu_date = lu.get("AccessKeyLastUsed", {}).get("LastUsedDate")
-                last_used = str(lu_date) if lu_date else "Never"
-            except Exception:
-                pass
-            access_keys.append({
-                "key_id": key_id[:12] + "...",
-                "status": k["Status"],
-                "last_used": last_used,
-            })
-    except Exception:
-        pass
-
-    last_login_raw = user.get("PasswordLastUsed")
-    created_raw = user.get("CreateDate")
-
-    return {
-        "username": username,
-        "user_id": user.get("UserId", ""),
-        "created": str(created_raw) if created_raw else "Unknown",
-        "has_mfa": has_mfa,
-        "last_login": str(last_login_raw) if last_login_raw else "Never",
-        "attached_policies": attached_policies,
-        "inline_policies": inline_policies,
-        "groups": groups,
-        "access_keys": access_keys,
-    }
+    username = user["UserName"]
+    errors, fields = [], {}
+    def detail(operation, key):
+        items, failures = _pages(iam_client, operation, key, UserName=username)
+        fields[operation] = "unknown" if failures else "complete"
+        errors.extend(failures)
+        return items if not failures else None
+    mfa = detail("list_mfa_devices", "MFADevices")
+    attached = detail("list_attached_user_policies", "AttachedPolicies")
+    inline = detail("list_user_policies", "PolicyNames")
+    groups = detail("list_groups_for_user", "Groups")
+    keys = detail("list_access_keys", "AccessKeyMetadata")
+    access_keys = None if keys is None else []
+    for key in keys or []:
+        last_used = None
+        try:
+            date = iam_client.get_access_key_last_used(AccessKeyId=key["AccessKeyId"])["AccessKeyLastUsed"].get("LastUsedDate")
+            last_used = str(date) if date else "Never"
+        except Exception as error:
+            errors.append({"operation": "get_access_key_last_used", **_error(error)})
+        access_keys.append({"key_id": key["AccessKeyId"][:12] + "...", "status": key["Status"],
+                            "last_used": last_used, "last_used_status": "unknown" if last_used is None else "complete"})
+    return {"username": username, "user_id": user.get("UserId", ""),
+            "created": str(user.get("CreateDate", "Unknown")),
+            "has_mfa": None if mfa is None else bool(mfa),
+            "last_login": str(user["PasswordLastUsed"]) if user.get("PasswordLastUsed") else "Never",
+            "attached_policies": None if attached is None else [{"name": p["PolicyName"], "arn": p["PolicyArn"]} for p in attached],
+            "inline_policies": inline, "groups": None if groups is None else [g["GroupName"] for g in groups],
+            "access_keys": access_keys, "field_statuses": fields, "errors": errors,
+            "coverage": "partial" if errors else "complete"}
 
 
+@_scan("users")
 def scan_iam() -> dict:
-    """Scan all IAM users, fetching MFA status and login history in parallel via ThreadPoolExecutor."""
-
-    try:
-        iam_client = (
-            get_connection().client("iam")
-        )
-
-        paginator = iam_client.get_paginator("list_users")
-        all_users = [u for page in paginator.paginate() for u in page["Users"]]
-
-        fetch = partial(_fetch_user_details, iam_client)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            users = list(executor.map(fetch, all_users))
-
-        return {
-            "status": "ok",
-            "user_count": len(users),
-            "users": users,
-        }
-
-    except NoCredentialsError:
-        return {
-            "status": "error",
-            "error": "AWS credentials not found. Run 'aws configure' to set them up.",
-            "user_count": 0,
-            "users": [],
-        }
-    except ClientError as error:
-        return {
-            "status": "error",
-            "error": f"AWS API error: {error.response.get('Error', {}).get('Message', str(error))}",
-            "user_count": 0,
-            "users": [],
-        }
-    except Exception as error:
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(error)}",
-            "user_count": 0,
-            "users": [],
-        }
+    client = get_connection().client("iam")
+    raw, errors = _pages(client, "list_users", "Users")
+    inventory_complete = not errors
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        users = list(executor.map(partial(_fetch_user_details, client), raw))
+    errors.extend({"resource_id": user["username"], **error} for user in users for error in user["errors"])
+    return _result("users", users, errors, inventory_complete)
 
 
+@_scan("security_groups")
 def scan_security_groups(region: str = "") -> dict:
-    """Scan all EC2 security groups and flag any with inbound rules open to 0.0.0.0/0 or ::/0."""
-
-    try:
-        ec2_client = (
-            get_connection(region).client("ec2", region_name=region)
-        )
-
-        paginator = ec2_client.get_paginator("describe_security_groups")
-        all_sgs = [sg for page in paginator.paginate() for sg in page["SecurityGroups"]]
-
-        security_groups = []
-
-        for sg in all_sgs:
-            open_to_internet = []
-
-            for rule in sg.get("IpPermissions", []):
-                port = rule.get("FromPort", "all")
-                protocol = rule.get("IpProtocol", "unknown")
-
-                for ip_range in rule.get("IpRanges", []):
-                    if ip_range.get("CidrIp") == "0.0.0.0/0":
-                        open_to_internet.append(
-                            {
-                                "port": port,
-                                "to_port": rule.get("ToPort", port),
-                                "protocol": protocol,
-                            }
-                        )
-
-                for ipv6_range in rule.get("Ipv6Ranges", []):
-                    if ipv6_range.get("CidrIpv6") == "::/0":
-                        already_added = any(
-                            entry["port"] == port and entry["protocol"] == protocol
-                            for entry in open_to_internet
-                        )
-                        if not already_added:
-                            open_to_internet.append(
-                                {
-                                    "port": port,
-                                    "to_port": rule.get("ToPort", port),
-                                    "protocol": protocol,
-                                }
-                            )
-                        break
-
-            security_groups.append(
-                {
-                    "id": sg.get("GroupId", ""),
-                    "name": sg.get("GroupName", ""),
-                    "description": sg.get("Description", ""),
-                    "vpc_id": sg.get("VpcId"),
-                    "open_to_internet": open_to_internet,
-                    "is_dangerous": len(open_to_internet) > 0,
-                }
-            )
-
-        return {
-            "status": "ok",
-            "count": len(security_groups),
-            "security_groups": security_groups,
-        }
-
-    except NoCredentialsError:
-        return {
-            "status": "error",
-            "error": "AWS credentials not found. Run 'aws configure' to set them up.",
-            "count": 0,
-            "security_groups": [],
-        }
-    except ClientError as error:
-        return {
-            "status": "error",
-            "error": f"AWS API error: {error.response.get('Error', {}).get('Message', str(error))}",
-            "count": 0,
-            "security_groups": [],
-        }
-    except Exception as error:
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(error)}",
-            "count": 0,
-            "security_groups": [],
-        }
+    client = get_connection(region).client("ec2", region_name=region)
+    raw, errors = _pages(client, "describe_security_groups", "SecurityGroups")
+    groups = []
+    for sg in raw:
+        rules, public = [], []
+        for rule in sg.get("IpPermissions", []):
+            entry = {"port": rule.get("FromPort"), "to_port": rule.get("ToPort"),
+                     "protocol": str(rule.get("IpProtocol", "unknown")),
+                     "ipv4_cidrs": [r["CidrIp"] for r in rule.get("IpRanges", [])],
+                     "ipv6_cidrs": [r["CidrIpv6"] for r in rule.get("Ipv6Ranges", [])],
+                     "prefix_list_ids": [r["PrefixListId"] for r in rule.get("PrefixListIds", [])],
+                     "source_security_groups": rule.get("UserIdGroupPairs", [])}
+            rules.append(entry)
+            sources = [cidr for cidr in entry["ipv4_cidrs"] + entry["ipv6_cidrs"] if cidr in ("0.0.0.0/0", "::/0")]
+            if sources:
+                public.append({**entry, "sources": sources})
+        groups.append({"id": sg.get("GroupId", ""), "name": sg.get("GroupName", ""),
+                       "description": sg.get("Description", ""), "vpc_id": sg.get("VpcId"),
+                       "ingress_rules": rules, "open_to_internet": public, "is_dangerous": bool(public)})
+    return _result("security_groups", groups, errors, not errors)
 
 
+@_scan("vpcs")
 def scan_vpc(region: str = "") -> dict:
-    """Scan all VPCs and count subnets per VPC."""
-
-    try:
-        ec2_client = (
-            get_connection(region).client("ec2", region_name=region)
-        )
-
-        vpc_paginator = ec2_client.get_paginator("describe_vpcs")
-        all_vpcs = [v for page in vpc_paginator.paginate() for v in page["Vpcs"]]
-
-        subnet_paginator = ec2_client.get_paginator("describe_subnets")
-        subnet_counts: defaultdict = defaultdict(int)
-        for page in subnet_paginator.paginate():
-            for sn in page["Subnets"]:
-                subnet_counts[sn["VpcId"]] += 1
-
-        vpcs = []
-
-        for vpc in all_vpcs:
-            vpc_id = vpc.get("VpcId", "")
-
-            name = ""
-            for tag in vpc.get("Tags", []):
-                if tag.get("Key") == "Name":
-                    name = tag.get("Value", "")
-                    break
-
-            subnet_count = subnet_counts[vpc_id]
-
-            vpcs.append(
-                {
-                    "id": vpc_id,
-                    "name": name,
-                    "cidr": vpc.get("CidrBlock", ""),
-                    "is_default": vpc.get("IsDefault", False),
-                    "state": vpc.get("State", ""),
-                    "subnet_count": subnet_count,
-                }
-            )
-
-        return {
-            "status": "ok",
-            "count": len(vpcs),
-            "vpcs": vpcs,
-        }
-
-    except NoCredentialsError:
-        return {
-            "status": "error",
-            "error": "AWS credentials not found. Run 'aws configure' to set them up.",
-            "count": 0,
-            "vpcs": [],
-        }
-    except ClientError as error:
-        return {
-            "status": "error",
-            "error": f"AWS API error: {error.response.get('Error', {}).get('Message', str(error))}",
-            "count": 0,
-            "vpcs": [],
-        }
-    except Exception as error:
-        return {
-            "status": "error",
-            "error": f"Unexpected error: {str(error)}",
-            "count": 0,
-            "vpcs": [],
-        }
+    client = get_connection(region).client("ec2", region_name=region)
+    raw, errors = _pages(client, "describe_vpcs", "Vpcs")
+    inventory_complete = not errors
+    subnets, failures = _pages(client, "describe_subnets", "Subnets")
+    errors.extend(failures)
+    vpcs = [{"id": vpc["VpcId"],
+             "name": next((t["Value"] for t in vpc.get("Tags", []) if t["Key"] == "Name"), ""),
+             "cidr": vpc.get("CidrBlock", ""), "is_default": vpc.get("IsDefault", False),
+             "state": vpc.get("State", ""),
+             "subnet_count": None if failures else sum(sn["VpcId"] == vpc["VpcId"] for sn in subnets),
+             "subnet_count_status": "unknown" if failures else "complete"} for vpc in raw]
+    return _result("vpcs", vpcs, errors, inventory_complete)
 
 
 def scan_existing_infra_for_context(region: str = "") -> str:
@@ -551,127 +318,24 @@ def scan_existing_infra_for_context(region: str = "") -> str:
     return "\n".join(lines)
 
 
+@_scan("security_groups")
 def scan_sg_usage(region: str = "") -> dict:
-    """Build a complete map of security group → attached resources using ENIs, which covers all AWS resource types."""
-    try:
-        ec2 = (
-            get_connection(region).client("ec2", region_name=region)
-        )
-
-        # Seed the map with every SG so unused ones appear as empty lists
-        sg_paginator = ec2.get_paginator("describe_security_groups")
-        all_sgs = [sg for page in sg_paginator.paginate() for sg in page["SecurityGroups"]]
-        sg_usage = {sg["GroupId"]: [] for sg in all_sgs}
-
-        # Walk every ENI — one ENI can reference multiple SGs
-        eni_paginator = ec2.get_paginator("describe_network_interfaces")
-        for page in eni_paginator.paginate():
-            for eni in page["NetworkInterfaces"]:
-                eni_id     = eni["NetworkInterfaceId"]
-                desc       = eni.get("Description", "")
-                attachment = eni.get("Attachment", {})
-                instance_id = attachment.get("InstanceId", "")
-
-                # Classify resource type from ENI description / interface type
-                if instance_id:
-                    resource       = instance_id
-                    resource_type  = "EC2"
-                elif desc.startswith("ELB"):
-                    resource       = desc
-                    resource_type  = "ELB"
-                elif "RDS" in desc or "rds" in desc.lower():
-                    resource       = desc or eni_id
-                    resource_type  = "RDS"
-                elif "Lambda" in desc or "lambda" in desc.lower():
-                    resource       = desc or eni_id
-                    resource_type  = "Lambda"
-                elif "ECS" in desc or "ecs" in desc.lower():
-                    resource       = desc or eni_id
-                    resource_type  = "ECS"
-                else:
-                    resource       = desc or eni_id
-                    resource_type  = "ENI"
-
-                for group in eni.get("Groups", []):
-                    sg_id = group["GroupId"]
-                    if sg_id in sg_usage:
-                        sg_usage[sg_id].append({
-                            "resource":      resource,
-                            "resource_type": resource_type,
-                            "eni_id":        eni_id,
-                        })
-
-        unused_ids = [sg_id for sg_id, usages in sg_usage.items() if not usages]
-
-        return {
-            "status":        "ok",
-            "total_count":   len(sg_usage),
-            "unused_count":  len(unused_ids),
-            "unused_sg_ids": unused_ids,
-            "sg_usage":      sg_usage,
-        }
-
-    except ClientError as e:
-        return {"status": "error", "error": str(e), "sg_usage": {}, "unused_sg_ids": [], "unused_count": 0, "total_count": 0}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "sg_usage": {}, "unused_sg_ids": [], "unused_count": 0, "total_count": 0}
-
-
-def revoke_sg_ingress_rule(
-    sg_id: str,
-    port: int,
-    region: str = "",
-) -> dict:
-    """Revoke all 0.0.0.0/0 and ::/0 ingress rules for a port on a security group. Calls the AWS SDK directly since Terraform cannot remove individual rules from unmanaged groups."""
-    try:
-        ec2 = (
-            get_connection(region).client("ec2", region_name=region)
-        )
-
-        response = ec2.describe_security_groups(GroupIds=[sg_id])
-        sgs = response.get("SecurityGroups", [])
-        if not sgs:
-            return {"success": False, "revoked": 0, "message": f"Security group {sg_id} not found."}
-
-        rules_to_revoke = []
-        for perm in sgs[0].get("IpPermissions", []):
-            from_port = perm.get("FromPort", -1)
-            to_port   = perm.get("ToPort",   -1)
-
-            # Match rules that cover the target port (including all-protocol rules)
-            proto = perm.get("IpProtocol", "")
-            port_match = (
-                proto == "-1"
-                or (isinstance(from_port, int) and isinstance(to_port, int) and from_port <= port <= to_port)
-            )
-            if not port_match:
-                continue
-
-            open_v4 = [r for r in perm.get("IpRanges",   []) if r.get("CidrIp")   == "0.0.0.0/0"]
-            open_v6 = [r for r in perm.get("Ipv6Ranges", []) if r.get("CidrIpv6") == "::/0"]
-
-            if open_v4 or open_v6:
-                revoke_perm = {"IpProtocol": proto}
-                if proto != "-1":
-                    revoke_perm["FromPort"] = from_port
-                    revoke_perm["ToPort"]   = to_port
-                if open_v4:
-                    revoke_perm["IpRanges"]   = open_v4
-                if open_v6:
-                    revoke_perm["Ipv6Ranges"] = open_v6
-                rules_to_revoke.append(revoke_perm)
-
-        if not rules_to_revoke:
-            return {"success": True, "revoked": 0, "message": "No open 0.0.0.0/0 rules found for this port."}
-
-        ec2.revoke_security_group_ingress(GroupId=sg_id, IpPermissions=rules_to_revoke)
-        return {
-            "success": True,
-            "revoked": len(rules_to_revoke),
-            "message": f"Revoked {len(rules_to_revoke)} open rule(s) on port {port} for {sg_id}.",
-        }
-
-    except ClientError as e:
-        return {"success": False, "revoked": 0, "message": str(e)}
-    except Exception as e:
-        return {"success": False, "revoked": 0, "message": str(e)}
+    """Inspect ENI associations; absence of an ENI is not proof an SG can be deleted."""
+    client = get_connection(region).client("ec2", region_name=region)
+    groups, errors = _pages(client, "describe_security_groups", "SecurityGroups")
+    inventory_complete = not errors
+    interfaces, failures = _pages(client, "describe_network_interfaces", "NetworkInterfaces")
+    errors.extend(failures)
+    usage = {group["GroupId"]: [] for group in groups}
+    for eni in interfaces:
+        eni_id = eni["NetworkInterfaceId"]
+        instance = eni.get("Attachment", {}).get("InstanceId")
+        for group in eni.get("Groups", []):
+            if group["GroupId"] in usage:
+                usage[group["GroupId"]].append({"resource": instance or eni.get("Description") or eni_id,
+                                              "resource_type": "EC2" if instance else "ENI", "eni_id": eni_id})
+    unused = None if errors else [sg for sg, associations in usage.items() if not associations]
+    return {**_result("security_groups", groups, errors, inventory_complete),
+            "total_count": len(groups), "sg_usage": usage, "unused_sg_ids": unused,
+            "unused_count": None if unused is None else len(unused),
+            "scope": "ENI associations only. Other references and future service associations are not assessed; do not infer deletion safety."}

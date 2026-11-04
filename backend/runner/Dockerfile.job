@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /opt/aca
+COPY requirements-runner.txt /opt/aca/requirements-runner.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements-runner.txt
+COPY runner /opt/aca/runner
+COPY services/aws_terraform_guard.py services/aws_connection.py /opt/aca/services/
+RUN python -m runner.install_tools
+ENV TF_CLI_CONFIG_FILE=/opt/aca/terraform.rc CHECKPOINT_DISABLE=1
+RUN terraform -chdir=/build init -backend=false -input=false -no-color \
+    && cp /build/.terraform.lock.hcl /opt/aca/provider.lock.hcl \
+    && rm -rf /build \
+    && groupadd -g 10001 aca && useradd -u 10001 -g 10001 -M aca
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "runner.job"]

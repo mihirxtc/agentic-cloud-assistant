@@ -26,7 +26,6 @@ from services.aws_scanner import (
     scan_security_groups,
     scan_vpc,
     scan_existing_infra_for_context,
-    revoke_sg_ingress_rule,
     scan_sg_usage,
 )
 from services.cost_analyzer import (
@@ -36,14 +35,8 @@ from services.cost_analyzer import (
     get_monthly_trend,
 )
 from services.execution_service import (
-    cleanup_workdir_plugins,
-    create_execution_id,
     get_execution_history,
-    log_execution,
     log_execution_update,
-    run_terraform_apply,
-    run_terraform_destroy,
-    run_terraform_plan,
 )
 from services.llm_service import (
     chat_with_anthropic,
@@ -53,7 +46,7 @@ from services.llm_service import (
 )
 from ollama_catalog import MODELS, DEFAULT_MODEL
 from services.ollama_service import probe_ollama, stream_ollama_pull
-from services.security_analyzer import run_security_analysis
+from services.scan_coverage import assessment, scan_coverage
 from services.terraform_service import (
     generate_terraform,
     handle_summarise_plan,
@@ -65,23 +58,23 @@ mcp = FastMCP("agentic-cloud-assistant")
 from services.aws_connection import aws_operation, get_connection, require_record_connection, require_scan_connection
 from services.aws_cache import cached_context
 from services.storage import get_execution_store
+from services.action_service import propose_terraform, propose_ingress, propose_destroy, decide
 
 _SCAN_SERVICES = ("ec2", "s3", "iam", "security_groups", "vpc")
 
 
 def _collect_scan(region=""):
     connection = get_connection(region)
+    started_at = datetime.now(timezone.utc).isoformat()
     services = {
         "ec2": scan_ec2(region=connection.region), "s3": scan_s3(), "iam": scan_iam(),
         "security_groups": scan_security_groups(region=connection.region), "vpc": scan_vpc(region=connection.region),
     }
     scan_id = get_execution_store().record_scan(connection.identity, services)
-    return {**services, "scan_id": scan_id, "aws_identity": connection.identity}
-
-
-def _scan_errors(scan_data):
-    return {name: scan_data.get(name, {}).get("error", "Scan incomplete")
-            for name in _SCAN_SERVICES if scan_data.get(name, {}).get("status") != "ok"}
+    coverage = scan_coverage(services)
+    return {**services, "scan_id": scan_id, "aws_identity": connection.identity,
+            "status": coverage["status"], "coverage": coverage, "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat()}
 
 
 def _resolve_key(model: str, override: str) -> str:
@@ -168,20 +161,7 @@ def scan_sg_usage_tool(
 @mcp.tool()
 def analyse_security_findings(scan_data: dict) -> dict:
     """Run 7 built-in security rules against raw AWS scan data."""
-    scan_errors = _scan_errors(scan_data)
-    if scan_errors:
-        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
-
-    findings = run_security_analysis(scan_data)
-    for finding in findings:
-        if scan_data.get("scan_id"):
-            finding["scan_id"] = scan_data["scan_id"]
-            finding["aws_identity"] = scan_data["aws_identity"]
-    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    for f in findings:
-        sev = f.get("severity", "LOW")
-        counts[sev] = counts.get(sev, 0) + 1
-    return {"total_findings": len(findings), "severity_counts": counts, "findings": findings}
+    return assessment(scan_data)
 
 
 @mcp.tool()
@@ -196,47 +176,19 @@ async def run_security_analysis_with_summary(
     """Scan AWS, run security rules, and generate an LLM plain-English summary."""
     scan_data = _collect_scan(region)
 
-    scan_errors = _scan_errors(scan_data)
-    if scan_errors:
-        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
-
-    findings = run_security_analysis(scan_data)
-    for finding in findings:
-        if scan_data.get("scan_id"):
-            finding["scan_id"] = scan_data["scan_id"]
-            finding["aws_identity"] = scan_data["aws_identity"]
-    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    for f in findings:
-        sev = f.get("severity", "LOW")
-        counts[sev] = counts.get(sev, 0) + 1
-
-    if findings:
+    result = assessment(scan_data)
+    # Coverage and no-finding wording are deterministic, not delegated to a model.
+    if result["status"] == "complete" and result["findings"]:
         summary_prompt = (
-            f"You are an AWS security expert. Summarise these {len(findings)} "
-            f"security findings in 2-3 concise paragraphs for a cloud engineer:\n\n"
-            + json.dumps(
-                [
-                    {
-                        "severity": f.get("severity"),
-                        "title": f.get("title"),
-                        "resource_id": f.get("resource_id"),
-                        "recommendation": f.get("recommendation"),
-                    }
-                    for f in findings
-                ],
-                indent=2,
-            )
+            "Summarise these built-in AWS security findings. Stay within this limited "
+            "scope; do not claim the account is secure or all resources were audited.\n"
+            + json.dumps(result["findings"])
         )
-        llm_summary = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
-    else:
-        llm_summary = "No security issues found. Your AWS infrastructure looks clean."
-
-    return {
-        "findings": findings,
-        "severity_counts": counts,
-        "total_findings": len(findings),
-        "llm_summary": llm_summary,
-    }
+        try:
+            result["llm_summary"] = await prompt_llm(summary_prompt, model, _resolve_key(model, api_key), model_name=ollama_model_name)
+        except Exception:
+            result["summary_error"] = "Model summary unavailable; confirmed findings are retained."
+    return result
 
 
 @mcp.tool()
@@ -397,78 +349,39 @@ def validate_terraform_plan(hcl: str) -> dict:
 @mcp.tool()
 @aws_operation('aws_region')
 async def run_terraform_plan_mcp(
-    hcl_config: str,
-    description: str = "",
-    aws_region: str = "",
-    expected_account_id: str = "",
+    hcl_config: str, description: str = "", aws_region: str = "",
+    expected_account_id: str = "", idempotency_key: str = "",
 ) -> dict:
-    """Write HCL to a persistent working directory, run terraform init + plan."""
-    execution_id = create_execution_id()
-    plan_result = await asyncio.to_thread(run_terraform_plan, hcl_config, execution_id)
-
-    status = "awaiting_approval" if plan_result["success"] else "plan_failed"
-    log_execution(
-        {
-            "execution_id": execution_id, "aws_identity": get_connection().identity,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": status,
-            "description": description or "Terraform plan",
-            "plan_output": plan_result.get("plan_output", ""),
-            "resources_to_add": plan_result.get("resources_to_add", 0),
-            "resources_to_change": plan_result.get("resources_to_change", 0),
-            "resources_to_destroy": plan_result.get("resources_to_destroy", 0),
-        }
-    )
-
-    return {
-        "execution_id": execution_id, "aws_identity": get_connection().identity,
-        "status": status,
-        "plan_output": plan_result.get("plan_output", ""),
-        "resources_to_add": plan_result.get("resources_to_add", 0),
-        "resources_to_change": plan_result.get("resources_to_change", 0),
-        "resources_to_destroy": plan_result.get("resources_to_destroy", 0),
-    }
+    """Prepare an immutable saved plan for explicit digest-bound approval."""
+    return await asyncio.to_thread(propose_terraform, hcl_config, description, idempotency_key)
 
 
 @mcp.tool()
 @aws_operation('aws_region', execution=True, mutating=True)
 def run_terraform_apply_mcp(
-    execution_id: str,
-    approved: bool,
-    aws_region: str = "",
-    expected_account_id: str = "",
+    execution_id: str, approved: bool, aws_region: str = "", expected_account_id: str = "",
+    approval_digest: str = "", idempotency_key: str = "",
 ) -> dict:
-    """Apply or reject a previously planned Terraform execution."""
-    if not approved:
-        log_execution_update(execution_id, {"status": "rejected"})
-        cleanup_workdir_plugins(execution_id)
-        return {"status": "rejected", "apply_output": "", "resources_applied": []}
-
-    apply_result = run_terraform_apply(execution_id)
-    status = "complete" if apply_result.get("success") else "failed"
-    log_execution_update(
-        execution_id,
-        {
-            "status": status,
-            "apply_output": apply_result.get("apply_output", ""),
-            "resources_applied": apply_result.get("resources_applied", []),
-        },
-    )
-    return {
-        "status": status,
-        "apply_output": apply_result.get("apply_output", ""),
-        "resources_applied": apply_result.get("resources_applied", []),
-        "key_files": [
-            {"name": kf["name"], "download_path": f"/terraform/keys/{execution_id}/{kf['name']}"}
-            for kf in apply_result.get("key_files", [])
-        ],
-    }
+    """Claim and execute the reviewed action once, or reject it without AWS access."""
+    result = decide(execution_id, approved, approval_digest, idempotency_key)
+    result["key_files"] = [{"name": key["name"], "download_path": f"/terraform/keys/{execution_id}/{key['name']}"}
+                           for key in result.get("key_files", [])]
+    return result
 
 
 @mcp.tool()
 def get_execution_history_tool() -> dict:
     """Return all past Terraform plan/apply executions from the execution log."""
-    return {"executions": get_execution_history()}
+    from services.action_service import action_view
+    store = get_execution_store()
+    executions = []
+    for entry in get_execution_history():
+        view = action_view(entry)
+        events = store.action_events(entry["execution_id"])
+        if events:
+            view["events"] = events
+        executions.append(view)
+    return {"executions": executions}
 
 
 @mcp.tool()
@@ -546,17 +459,12 @@ async def agent_run(
 
     scan_data = _collect_scan(region)
 
-    scan_errors = _scan_errors(scan_data)
-    if scan_errors:
-        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
-
-    findings = run_security_analysis(scan_data)
-    for finding in findings:
-        if scan_data.get("scan_id"):
-            finding["scan_id"] = scan_data["scan_id"]
-            finding["aws_identity"] = scan_data["aws_identity"]
+    result = assessment(scan_data)
+    if result["status"] != "complete":
+        return {**result, "message": result["llm_summary"] + " Remediation was not started."}
+    findings = result["findings"]
     if not findings:
-        return {"status": "no_issues", "message": "No security issues found."}
+        return {**result, "status": "no_issues", "message": result["llm_summary"]}
 
     issue = findings[0]
 
@@ -570,64 +478,13 @@ async def agent_run(
     )
     resolved_key = _resolve_key(resolved_model, api_key)
 
-    execution_id = create_execution_id()
-
     # Security group open-port issues are fixed by revoking the 0.0.0.0/0 rule
     # directly via the AWS SDK. Terraform cannot manage rules it did not create,
     # so generating HCL for these always fails with duplicate-rule errors on retry.
     SG_REVOKE_RULES = ("SSH_PORT_OPEN", "RDP_PORT_OPEN", "UNRESTRICTED_ALL_TRAFFIC")
     if issue.get("rule") in SG_REVOKE_RULES:
-        sg_id = issue["resource_id"]
-        port  = issue["metadata"].get("port", -1)  # -1 matches all-traffic (protocol=-1) rules
-
-        plan_output = (
-            f"DIRECT AWS API ACTION — no Terraform state affected.\n\n"
-            f"Target:  {sg_id}\n"
-            f"Action:  Revoke all inbound rules open to 0.0.0.0/0 or ::/0 on port {port}\n"
-            f"Method:  ec2:RevokeSecurityGroupIngress\n\n"
-            f"This removes the dangerous open rule directly. "
-            f"If the rule is already gone this is a safe no-op."
-        )
-        hcl = (
-            f"# Direct AWS SDK action — no Terraform HCL required.\n"
-            f"# Will revoke 0.0.0.0/0 and ::/0 inbound rules on port {port}\n"
-            f"# for security group {sg_id} via ec2:RevokeSecurityGroupIngress."
-        )
-        summary_prompt = (
-            f"In 2-3 sentences for a non-expert, explain what this security fix does:\n\n"
-            f"Finding: {issue['title']}\n"
-            f"Fix: Remove the inbound rule that allows port {port} access from any IP "
-            f"address (0.0.0.0/0) on security group {sg_id}."
-        )
-        summary = await prompt_llm(summary_prompt, resolved_model, resolved_key, model_name=ollama_model_name)
-
-        log_execution({
-            "execution_id": execution_id, "aws_identity": get_connection().identity,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "awaiting_approval",
-            "description": fix_request,
-            "issue": issue,
-            "hcl": hcl,
-            "action_type": "sg_revoke",
-            "sg_id": sg_id,
-            "port": port,
-            "plan_output": plan_output,
-            "resources_to_add": 0,
-            "resources_to_change": 1,
-            "resources_to_destroy": 0,
-        })
-
-        return {
-            "status": "awaiting_approval",
-            "execution_id": execution_id, "aws_identity": get_connection().identity,
-            "issue": issue,
-            "hcl": hcl,
-            "plan_output": plan_output,
-            "resources_to_add": 0,
-            "resources_to_change": 1,
-            "resources_to_destroy": 0,
-            "summary": summary,
-        }
+        proposal = propose_ingress(issue["resource_id"], issue["metadata"].get("port", -1), scan_data["scan_id"])
+        return {**proposal, "issue": issue, "summary": "Review the exact protocols, ranges and public sources below before approving."}
 
     # All other issue types use the Terraform generate → plan → apply flow.
     existing_infra = ""
@@ -643,132 +500,27 @@ async def agent_run(
 
     hcl = terraform_result.get("hcl", "")
 
-    plan_result = await asyncio.to_thread(run_terraform_plan, hcl, execution_id)
-
-    if not plan_result.get("success"):
-        log_execution({"execution_id": execution_id, "aws_identity": get_connection().identity, "status": "plan_failed", "plan_output": plan_result.get("plan_output", "")})
-        return {"execution_id": execution_id, "aws_identity": get_connection().identity, "status": "plan_failed", "error": plan_result.get("plan_output", "Planning failed")}
-
-    plan_snippet = plan_result.get("plan_output", "")[:2000]
-    summary_prompt = (
-        f"Summarise this planned AWS infrastructure change in 2-3 sentences "
-        f"for a non-expert to review before approving:\n\n"
-        f"Issue: {issue['title']}\n"
-        f"Resource: {issue['resource_type']} {issue['resource_id']}\n"
-        f"Changes: +{plan_result.get('resources_to_add',0)} "
-        f"~{plan_result.get('resources_to_change',0)} "
-        f"-{plan_result.get('resources_to_destroy',0)}\n\n"
-        f"Plan:\n{plan_snippet}"
-    )
-    summary = await prompt_llm(summary_prompt, resolved_model, resolved_key, model_name=ollama_model_name)
-
-    log_execution(
-        {
-            "execution_id": execution_id, "aws_identity": get_connection().identity,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "awaiting_approval",
-            "description": fix_request,
-            "issue": issue,
-            "hcl": hcl,
-            "plan_output": plan_result.get("plan_output", ""),
-            "resources_to_add": plan_result.get("resources_to_add", 0),
-            "resources_to_change": plan_result.get("resources_to_change", 0),
-            "resources_to_destroy": plan_result.get("resources_to_destroy", 0),
-        }
-    )
-
-    return {
-        "status": "awaiting_approval",
-        "execution_id": execution_id, "aws_identity": get_connection().identity,
-        "issue": issue,
-        "hcl": hcl,
-        "plan_output": plan_result.get("plan_output", ""),
-        "resources_to_add": plan_result.get("resources_to_add", 0),
-        "resources_to_change": plan_result.get("resources_to_change", 0),
-        "resources_to_destroy": plan_result.get("resources_to_destroy", 0),
-        "summary": summary,
-    }
+    proposal = await asyncio.to_thread(propose_terraform, hcl, fix_request)
+    return {**proposal, "issue": issue, "hcl": hcl, "summary": "Review the saved Terraform plan before approving."}
 
 
 @mcp.tool()
 @aws_operation('aws_region', execution=True, mutating=True)
 def agent_approve(
-    execution_id: str,
-    approved: bool,
-    aws_region: str = "",
-    expected_account_id: str = "",
+    execution_id: str, approved: bool, aws_region: str = "", expected_account_id: str = "",
+    approval_digest: str = "", idempotency_key: str = "",
 ) -> dict:
-    """Approve or reject an agent-generated fix plan."""
-    if not approved:
-        log_execution_update(
-            execution_id,
-            {
-                "status": "rejected",
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        return {"status": "rejected", "apply_output": "", "resources_applied": []}
-
-    history = get_execution_history()
-    entry = next((e for e in history if e.get("execution_id") == execution_id), {})
-
-    require_record_connection(execution_id, aws_region)
-
-    if entry.get("action_type") == "sg_revoke":
-        sg_id = entry.get("sg_id", "")
-        port  = int(entry.get("port", 22))
-        result  = revoke_sg_ingress_rule(sg_id, port, aws_region)
-        success = result.get("success", False)
-        status  = "complete" if success else "failed"
-        msg     = result.get("message", "")
-        log_execution_update(
-            execution_id,
-            {
-                "status": status,
-                "apply_output": msg,
-                "resources_applied": [sg_id] if success else [],
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        return {
-            "status": status,
-            "apply_output": msg,
-            "resources_applied": [sg_id] if success else [],
-            "error": msg if not success else None,
-        }
-
-    apply_result = run_terraform_apply(execution_id)
-    status = "complete" if apply_result.get("success") else "failed"
-    log_execution_update(
-        execution_id,
-        {
-            "status": status,
-            "apply_output": apply_result.get("apply_output", ""),
-            "resources_applied": apply_result.get("resources_applied", []),
-            "approved_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-    return {
-        "status": status,
-        "apply_output": apply_result.get("apply_output", ""),
-        "resources_applied": apply_result.get("resources_applied", []),
-        "error": apply_result.get("apply_output", "") if status == "failed" else None,
-    }
+    """Approve/reject an agent proposal through the shared transactional executor."""
+    return decide(execution_id, approved, approval_digest, idempotency_key)
 
 
 @mcp.tool()
-@aws_operation('region', scan=True, mutating=True)
+@aws_operation('region', scan=True)
 def revoke_open_ingress_rule(
-    sg_id: str,
-    port: int,
-    scan_id: str,
-    region: str = "",
-    expected_account_id: str = "",
+    sg_id: str, port: int, scan_id: str, region: str = "", expected_account_id: str = "", idempotency_key: str = "",
 ) -> dict:
-    """Revoke all 0.0.0.0/0 and ::/0 ingress rules for a specific port on a security group."""
-
-    require_scan_connection(scan_id, region)
-    return revoke_sg_ingress_rule(sg_id, port, region)
+    """Prepare exact public ingress removal for review. Does not mutate AWS."""
+    return propose_ingress(sg_id, port, scan_id, idempotency_key)
 
 
 @mcp.tool()
@@ -782,21 +534,12 @@ def mark_execution_resolved(execution_id: str) -> dict:
 
 
 @mcp.tool()
-@aws_operation('aws_region', execution=True, mutating=True)
+@aws_operation('aws_region', execution=True)
 async def rollback_execution(
-    execution_id: str,
-    aws_region: str = "",
-    expected_account_id: str = "",
+    execution_id: str, aws_region: str = "", expected_account_id: str = "", idempotency_key: str = "",
 ) -> dict:
-    """Destroy resources created by a previous terraform apply (rollback)."""
-
-    result = await asyncio.to_thread(run_terraform_destroy, execution_id)
-    status = "rolled_back" if result["success"] else "rollback_failed"
-    log_execution_update(execution_id, {
-        "status":         status,
-        "destroy_output": result.get("destroy_output", ""),
-    })
-    return {"status": status, "destroy_output": result.get("destroy_output", "")}
+    """Prepare a separate saved destroy plan. Approval is a distinct request."""
+    return await asyncio.to_thread(propose_destroy, execution_id, idempotency_key)
 
 
 try:
@@ -972,24 +715,7 @@ def aws_findings_resource(region: str) -> dict:
     Example:     aws://findings/us-east-1
     """
     scan_data = _collect_scan(region)
-    scan_errors = _scan_errors(scan_data)
-    if scan_errors:
-        return {"status": "partial" if len(scan_errors) < len(_SCAN_SERVICES) else "failed", "findings": [], "total_findings": 0, "severity_counts": {}, "errors": scan_errors, "llm_summary": "Assessment incomplete: some AWS services could not be inspected."}
-
-    findings = run_security_analysis(scan_data)
-    for finding in findings:
-        if scan_data.get("scan_id"):
-            finding["scan_id"] = scan_data["scan_id"]
-            finding["aws_identity"] = scan_data["aws_identity"]
-    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    for f in findings:
-        counts[f.get("severity", "LOW")] = counts.get(f.get("severity", "LOW"), 0) + 1
-    return {
-        "region": region,
-        "total_findings": len(findings),
-        "severity_counts": counts,
-        "findings": findings,
-    }
+    return {**assessment(scan_data), "region": region}
 
 
 @mcp.resource("aws://cost-summary/{region}")

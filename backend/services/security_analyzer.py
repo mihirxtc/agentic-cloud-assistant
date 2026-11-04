@@ -1,14 +1,16 @@
+from datetime import datetime, timezone
+
+
 def port_exposed(entry: dict, port: int) -> bool:
     if str(entry.get("protocol")) == "-1":
         return True
-    if str(entry.get("protocol", "tcp")) not in ("tcp", "6"):
+    protocols = ("tcp", "6", "udp", "17") if port == 3389 else ("tcp", "6")
+    if str(entry.get("protocol")) not in protocols:
         return False
     start = entry.get("port")
     end = entry.get("to_port", start)
     return isinstance(start, int) and isinstance(end, int) and start <= port <= end
 
-
-from datetime import datetime, timezone
 
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
@@ -43,7 +45,7 @@ def check_ssh_port_open(security_groups_data: dict) -> list:
     findings = []
 
     try:
-        if security_groups_data.get("status") != "ok":
+        if security_groups_data.get("status") not in ("ok", "partial"):
             return []
 
         security_groups = security_groups_data.get("security_groups", [])
@@ -66,14 +68,16 @@ def check_ssh_port_open(security_groups_data: dict) -> list:
                             title="SSH port exposed to the internet",
                             description=(
                                 f"Security group {sg_name} allows SSH (port 22) access "
-                                f"from any IP address (0.0.0.0/0). This exposes the "
+                                f"from public IPv4 and/or IPv6 sources. This exposes the "
                                 f"server to brute-force and credential attacks."
                             ),
                             recommendation=(
                                 "Restrict port 22 to specific trusted IP addresses "
-                                "only. Remove the 0.0.0.0/0 rule immediately."
+                                "only. Review and remove the public IPv4/IPv6 rules."
                             ),
-                            metadata={"port": 22, "group_name": sg_name},
+                            metadata={"port": 22, "group_name": sg_name, "protocol": entry.get("protocol"),
+                                      "from_port": entry.get("port"), "to_port": entry.get("to_port", entry.get("port")),
+                                      "sources": entry.get("sources", [])},
                         )
                     )
                     break
@@ -89,7 +93,7 @@ def check_rdp_port_open(security_groups_data: dict) -> list:
     findings = []
 
     try:
-        if security_groups_data.get("status") != "ok":
+        if security_groups_data.get("status") not in ("ok", "partial"):
             return []
 
         security_groups = security_groups_data.get("security_groups", [])
@@ -119,7 +123,9 @@ def check_rdp_port_open(security_groups_data: dict) -> list:
                                 "Consider using AWS Systems Manager Session Manager "
                                 "instead of RDP for remote access."
                             ),
-                            metadata={"port": 3389, "group_name": sg_name},
+                            metadata={"port": 3389, "group_name": sg_name, "protocol": entry.get("protocol"),
+                                      "from_port": entry.get("port"), "to_port": entry.get("to_port", entry.get("port")),
+                                      "sources": entry.get("sources", [])},
                         )
                     )
                     break
@@ -135,7 +141,7 @@ def check_s3_bucket_public(s3_data: dict) -> list:
     findings = []
 
     try:
-        if s3_data.get("status") != "ok":
+        if s3_data.get("status") not in ("ok", "partial"):
             return []
 
         buckets = s3_data.get("buckets", [])
@@ -153,14 +159,15 @@ def check_s3_bucket_public(s3_data: dict) -> list:
                         resource_type="S3_BUCKET",
                         rule="S3_BUCKET_PUBLIC",
                         severity="HIGH",
-                        title="S3 bucket is publicly accessible",
+                        title="S3 bucket configuration permits public grants",
                         description=(
-                            f"Bucket {bucket_name} is publicly accessible. Anyone on "
-                            f"the internet can read its contents. This is a "
-                            f"critical data exposure risk."
+                            f"Bucket {bucket_name} has public bucket ACL or policy grants "
+                            f"not suppressed by inspected bucket/account access blocks. "
+                            f"Actual object access also depends on other controls; "
+                            f"anonymous object readability was not tested."
                         ),
                         recommendation=(
-                            "Remove public ACL from the bucket immediately. "
+                            "Review and remove public bucket ACL/policy grants. "
                             "Enable S3 Block Public Access settings. Review "
                             "bucket contents for sensitive data."
                         ),
@@ -179,7 +186,7 @@ def check_iam_user_no_mfa(iam_data: dict) -> list:
     findings = []
 
     try:
-        if iam_data.get("status") != "ok":
+        if iam_data.get("status") not in ("ok", "partial"):
             return []
 
         users = iam_data.get("users", [])
@@ -201,7 +208,7 @@ def check_iam_user_no_mfa(iam_data: dict) -> list:
                         description=(
                             f"User {username} does not have multi-factor "
                             f"authentication enabled. A stolen password alone "
-                            f"would grant full access to this account."
+                            f"could allow access subject to the user permissions."
                         ),
                         recommendation=(
                             "Enable MFA for this user immediately. Use a "
@@ -225,7 +232,7 @@ def check_unrestricted_traffic(security_groups_data: dict) -> list:
     findings = []
 
     try:
-        if security_groups_data.get("status") != "ok":
+        if security_groups_data.get("status") not in ("ok", "partial"):
             return []
 
         security_groups = security_groups_data.get("security_groups", [])
@@ -235,7 +242,7 @@ def check_unrestricted_traffic(security_groups_data: dict) -> list:
             sg_name = sg.get("name", "unknown")
 
             for entry in sg.get("open_to_internet", []):
-                if entry.get("protocol") == "-1":
+                if str(entry.get("protocol")) == "-1":
                     finding_id = f"UNRESTRICTED_ALL_TRAFFIC-{sg_id}-{i}"
 
                     findings.append(
@@ -270,14 +277,14 @@ def check_unrestricted_traffic(security_groups_data: dict) -> list:
 def check_iam_user_inactive(iam_data: dict) -> list:
     """Return LOW findings for IAM users inactive for 90+ days.
 
-    Triggers on last_login='Never' or a date string that parses to more than 90 days ago.
+    Console use only: a never-used user must also be older than 90 days.
     """
     findings = []
 
     NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60
 
     try:
-        if iam_data.get("status") != "ok":
+        if iam_data.get("status") not in ("ok", "partial"):
             return []
 
         users = iam_data.get("users", [])
@@ -286,14 +293,20 @@ def check_iam_user_inactive(iam_data: dict) -> list:
 
         for i, user in enumerate(users):
             username = user.get("username", "unknown")
-            last_login = user.get("last_login", "Never")
+            last_login = user.get("last_login")
 
             is_inactive = False
 
             if last_login == "Never":
-                is_inactive = True
+                try:
+                    created = datetime.fromisoformat(user.get("created", ""))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    is_inactive = (now_utc - created).total_seconds() > NINETY_DAYS_SECONDS
+                except (ValueError, TypeError):
+                    continue
 
-            else:
+            elif last_login is not None:
                 try:
                     last_login_dt = datetime.fromisoformat(str(last_login))
 
@@ -318,11 +331,11 @@ def check_iam_user_inactive(iam_data: dict) -> list:
                         resource_type="IAM_USER",
                         rule="IAM_USER_INACTIVE",
                         severity="LOW",
-                        title="IAM user has been inactive for 90+ days",
+                        title="IAM user has no observed console login for 90+ days",
                         description=(
                             f"User {username} has not logged in for over 90 "
-                            f"days (last login: {last_login}). Inactive accounts "
-                            f"are a security risk if credentials are compromised."
+                            f"days (last console login: {last_login}). This does not "
+                            f"establish inactivity of access keys or other programmatic access."
                         ),
                         recommendation=(
                             "Review whether this user still needs access. "
@@ -344,7 +357,7 @@ def check_default_vpc(vpc_data: dict) -> list:
     findings = []
 
     try:
-        if vpc_data.get("status") != "ok":
+        if vpc_data.get("status") not in ("ok", "partial"):
             return []
 
         vpcs = vpc_data.get("vpcs", [])
@@ -363,7 +376,7 @@ def check_default_vpc(vpc_data: dict) -> list:
                         resource_type="VPC",
                         rule="DEFAULT_VPC_IN_USE",
                         severity="LOW",
-                        title="Default VPC is in use",
+                        title="Default VPC exists",
                         description=(
                             f"The default VPC ({vpc_id}) exists in this region. "
                             f"The default VPC has permissive settings and is not "

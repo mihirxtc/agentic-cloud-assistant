@@ -41,12 +41,10 @@ def environment(tmp_path, monkeypatch):
     import services.storage as storage
     store = ExecutionStore(tmp_path / "data", tmp_path / "execution_log.json")
     monkeypatch.setattr(storage, "_default_store", store)
-    import services.execution_service as execution
-    monkeypatch.setattr(execution, "WORKDIR_BASE", tmp_path / "workdirs")
-    monkeypatch.setattr(execution.subprocess, "run", no_network)
+    from runner_test_support import FakeRunner
+    from services import runner_client
+    fake_runner = FakeRunner(tmp_path / "workdirs")
+    store.test_runner = fake_runner
+    monkeypatch.setattr(runner_client.RunnerClient, "request", lambda self, body: fake_runner.request(body))
     import http_app
-    monkeypatch.setattr(http_app, "WORKDIR_BASE", tmp_path / "workdirs")
-    monkeypatch.setattr(http_app, "PLUGIN_CACHE_DIR", tmp_path / "plugins")
-    import services.readiness as readiness
-    monkeypatch.setattr(readiness.shutil, "which", lambda name: "/mock/terraform")
     return mcp_server, http_app, store, knowledge_base

@@ -24,15 +24,22 @@ def connection(account=ACCOUNT, region='eu-west-1', token='test-session-token'):
                          '2026-10-28T12:00:00+00:00', session, 'test-access-key', 'test-secret-key', token)
 
 
+def fake_terraform(*args, **kwargs):
+    for part in args[0]:
+        if part.startswith('-out='):
+            (kwargs['cwd'] / part.split('=', 1)[1]).write_bytes(b'test saved plan')
+    return SimpleNamespace(returncode=0, stdout='Plan: 1 to add, 0 to change, 0 to destroy.', stderr='')
+
+
 @pytest.fixture
 def verified(environment, monkeypatch):
     server, _, store, _ = environment
     value = connection()
-    clients = {name: Mock() for name in ('ec2', 's3', 'iam', 'ce')}
+    clients = {name: Mock() for name in ('ec2', 's3', 's3control', 'iam', 'ce')}
     value.session.client.side_effect = lambda service, **kwargs: clients[service]
-    for name in ('ec2', 'iam'):
+    for name in ('ec2', 's3', 'iam'):
         clients[name].get_paginator.return_value.paginate.return_value = []
-    clients['s3'].list_buckets.return_value = {'Buckets': []}
+    clients['s3control'].get_public_access_block.return_value = {'PublicAccessBlockConfiguration': {}}
     clients['ce'].get_cost_and_usage.return_value = {'ResultsByTime': []}
     clients['ec2'].describe_security_groups.return_value = {'SecurityGroups': [{
         'GroupId': 'sg-test', 'IpPermissions': [{'IpProtocol': 'tcp', 'FromPort': 22, 'ToPort': 22,
@@ -105,7 +112,7 @@ def test_scan_verifies_once_and_persists_provenance_without_credentials(verified
     assert all(status == 'ok' for status in record['service_statuses'].values())
     assert 'test-secret-key' not in json.dumps(record)
     assert server.analyse_security_findings(result)['total_findings'] == 0
-    assert 'status' not in server.analyse_security_findings(result)  # metadata is not a failed service
+    assert server.analyse_security_findings(result)['status'] == 'complete'
 
 
 def test_expected_browser_account_blocks_before_any_service_call(verified, monkeypatch):
@@ -164,19 +171,21 @@ def test_direct_fix_requires_persisted_scan_identity(verified, monkeypatch):
     clients['ec2'].revoke_security_group_ingress.assert_not_called()
     monkeypatch.setattr(aws, 'verify_connection', Mock(return_value=value))
     result = server.revoke_open_ingress_rule('sg-test', 22, scan_id, region=value.region)
-    assert result['success'] is True
+    assert result['status'] == 'awaiting_approval'
+    clients['ec2'].revoke_security_group_ingress.assert_not_called()
+    approved = server.agent_approve(result['execution_id'], True, approval_digest=result['approval_digest'], idempotency_key='test-approve')
+    assert approved['status'] == 'complete'
     clients['ec2'].revoke_security_group_ingress.assert_called_once()
 
 
 def test_terraform_receives_frozen_tokens_and_persists_account_guard(verified, environment, tmp_path, monkeypatch):
     server, store, value, _, _ = verified
     import services.execution_service as execution
-    monkeypatch.setattr(execution, 'PLUGIN_CACHE_DIR', tmp_path / 'plugin-cache')
     monkeypatch.delenv('TF_STATE_BUCKET', raising=False)
     monkeypatch.setenv('AWS_PROFILE', 'must-not-be-reused')
     monkeypatch.setenv('AWS_SESSION_TOKEN', 'stale-token')
-    run = Mock(return_value=SimpleNamespace(returncode=0, stdout='Plan: 1 to add, 0 to change, 0 to destroy.', stderr=''))
-    monkeypatch.setattr(execution.subprocess, 'run', run)
+    run = Mock(side_effect=fake_terraform)
+    store.test_runner.run = run
     result = asyncio.run(server.run_terraform_plan_mcp('provider "aws" {}', aws_region=value.region))
     assert result['status'] == 'awaiting_approval'
     assert store.get(result['execution_id'])['aws_identity'] == value.identity
@@ -184,8 +193,9 @@ def test_terraform_receives_frozen_tokens_and_persists_account_guard(verified, e
     assert env['AWS_SESSION_TOKEN'] == value.token
     assert env['AWS_REGION'] == env['AWS_DEFAULT_REGION'] == env['TF_VAR_region'] == value.region
     assert 'AWS_PROFILE' not in env
+    assert 'ACA_OPERATOR_PASSWORD_HASH' not in env
     assert env['AWS_SECRET_ACCESS_KEY'] == value.secret_key
-    guard = json.loads((execution.WORKDIR_BASE / result['execution_id'] / 'aca_identity_override.tf.json').read_text())
+    guard = json.loads((store.test_runner.root / result['execution_id'] / 'aca_identity_override.tf.json').read_text())
     assert guard['provider']['aws'][0]['allowed_account_ids'] == [ACCOUNT]
     assert 'test-secret-key' not in json.dumps(result) + json.dumps(store.history())
 
@@ -198,13 +208,12 @@ def test_missing_or_changed_terraform_guard_blocks_apply(verified, tmp_path, mon
     store.append({'execution_id': EXECUTION_ID, 'aws_identity': value.identity})
     result = execution.run_terraform_apply(EXECUTION_ID)
     assert not result['success']
-    assert 'guard' in result['apply_output']
+    assert result.get('uncertain') is False  # unclaimed internal apply is blocked before dispatch
 
 
 def test_long_lived_credentials_clear_stale_session_tokens(verified, tmp_path, monkeypatch):
     _, _, value, _, _ = verified
     from services import execution_service as execution
-    monkeypatch.setattr(execution, 'PLUGIN_CACHE_DIR', tmp_path / 'plugins')
     monkeypatch.setenv('AWS_SESSION_TOKEN', 'stale')
     monkeypatch.setenv('AWS_SECURITY_TOKEN', 'stale')
     env = execution._build_env(replace(value, token=None))
@@ -271,11 +280,11 @@ def test_authenticated_identity_endpoint_and_removed_credentials_schema(verified
     'resource "aws_instance" "x" { provisioner "local-exec" { command = "echo test" } }',
 ])
 def test_terraform_account_bypasses_are_rejected_before_init(verified, monkeypatch, hcl):
-    _, _, value, _, _ = verified
+    _, store, value, _, _ = verified
     import services.execution_service as execution
     monkeypatch.setattr(execution, 'get_connection', lambda: value)
     run = Mock(side_effect=AssertionError('Terraform must not start'))
-    monkeypatch.setattr(execution.subprocess, 'run', run)
+    store.test_runner.run = run
     result = execution.run_terraform_plan(hcl, EXECUTION_ID)
     assert result['success'] is False
     run.assert_not_called()
@@ -304,21 +313,25 @@ def test_normal_generated_root_configuration_is_supported(verified):
 def test_successful_apply_and_destroy_keep_recorded_account(verified, tmp_path, monkeypatch):
     server, store, value, _, _ = verified
     import services.execution_service as execution
-    monkeypatch.setattr(execution, 'PLUGIN_CACHE_DIR', tmp_path / 'plugins')
     monkeypatch.delenv('TF_STATE_BUCKET', raising=False)
-    run = Mock(return_value=SimpleNamespace(returncode=0, stdout='Plan: 1 to add, 0 to change, 0 to destroy.', stderr=''))
-    monkeypatch.setattr(execution.subprocess, 'run', run)
+    run = Mock(side_effect=fake_terraform)
+    store.test_runner.run = run
     planned = asyncio.run(server.run_terraform_plan_mcp('provider "aws" {}', aws_region=value.region))
     execution_id = planned['execution_id']
-    (execution.WORKDIR_BASE / execution_id / 'tfplan').write_bytes(b'fake saved plan')
     run.reset_mock()
-    assert server.run_terraform_apply_mcp(execution_id, True)['status'] == 'complete'
+    assert server.run_terraform_apply_mcp(execution_id, True, approval_digest=planned['approval_digest'], idempotency_key='apply-test')['status'] == 'complete'
     assert run.call_args.args[0][1] == 'apply'
     assert run.call_args.kwargs['env']['AWS_SESSION_TOKEN'] == value.token
     assert store.get(execution_id)['aws_identity']['region'] == value.region
     run.reset_mock()
-    assert asyncio.run(server.rollback_execution(execution_id))['status'] == 'rolled_back'
-    assert run.call_args.args[0][1] == 'destroy'
+    destroy = asyncio.run(server.rollback_execution(execution_id))
+    assert destroy['status'] == 'awaiting_approval'
+    assert run.call_args.args[0][1] == 'plan'
+    assert '-destroy' in run.call_args.args[0]
+    approved = server.run_terraform_apply_mcp(destroy['execution_id'], True, approval_digest=destroy['approval_digest'], idempotency_key='destroy-test')
+    assert approved['status'] == 'complete'
+    assert run.call_args.args[0][1] == 'apply'
+    assert run.call_args.args[0][-1] == destroy['plan_file']
 
 
 def test_identity_endpoint_failure_does_not_reveal_sdk_details(environment, monkeypatch):

@@ -1,0 +1,5 @@
+# Optional loopback-only runner access for a host-based development backend.
+services:
+  terraform-runner:
+    ports:
+      - "127.0.0.1:8090:8090"

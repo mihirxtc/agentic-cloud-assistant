@@ -1,3 +1,6 @@
+import ActionReview from '../ui/ActionReview'
+import { decisionArgs, actionMessage } from '../../utils/approval'
+import { verificationMessage } from '../../utils/assessment'
 import { useState, useEffect } from 'react'
 import { callTool } from '../../api/mcpClient'
 import { authFetch } from '../../api/session'
@@ -10,9 +13,15 @@ const PHASE_BADGE = {
   complete:          ['success', 'COMPLETE'],
   failed:            ['error',   'FAILED'],
   rejected:          ['muted',   'REJECTED'],
+  uncertain:         ['warning', 'OUTCOME UNCERTAIN'],
+  invalidated:       ['warning', 'NEW REVIEW REQUIRED'],
 }
 
 function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, onDone }) {
+  const [proposal, setProposal] = useState(null)
+  const [destroyProposal, setDestroyProposal] = useState(null)
+  const [decisionKey] = useState(() => crypto.randomUUID())
+  const [proposalKey] = useState(() => crypto.randomUUID())
   const [phase,        setPhase]        = useState('planning')
   const [planOutput,   setPlanOutput]   = useState('')
   const [applyOutput,  setApplyOutput]  = useState('')
@@ -33,6 +42,7 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
     ;(async () => {
       try {
         const r = await callTool('run_terraform_plan_mcp', {
+          idempotency_key: proposalKey,
           hcl_config:  hcl,
           description: description || 'Terraform plan',
           ...awsArgs,
@@ -40,7 +50,8 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
         if (cancelled) return
         setPlanOutput(r.plan_output || '')
         setExecutionId(r.execution_id)
-        setPhase(r.status === 'awaiting_approval' ? 'awaiting_approval' : 'failed')
+        setProposal(r)
+        setPhase(['awaiting_approval', 'planning'].includes(r.status) ? r.status : 'failed')
       } catch (e) {
         if (!cancelled) {
           setError(e.message)
@@ -55,18 +66,19 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
     setPhase('applying')
     try {
       const r = await callTool('run_terraform_apply_mcp', {
-        execution_id: executionId,
-        approved:     true,
+        ...decisionArgs(proposal, true, decisionKey),
         ...awsArgs,
       })
       setApplyOutput(r.apply_output || '')
       if (r.key_files?.length) setKeyFiles(r.key_files)
-      const finalPhase = r.status === 'complete' ? 'complete' : 'failed'
+      const finalPhase = ['complete', 'applying', 'uncertain', 'invalidated', 'rejected', 'failed'].includes(r.status) ? r.status : 'failed'
       setPhase(finalPhase)
       if (finalPhase === 'complete') onApplyComplete?.()
+      else setError(actionMessage(r))
     } catch (e) {
       setApplyOutput(e.message)
-      setPhase('failed')
+      setError(actionMessage({ status: 'uncertain' }))
+      setPhase('uncertain')
     }
   }
 
@@ -106,15 +118,15 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
   }
 
   const rollback = async () => {
-    if (!window.confirm('This will destroy the AWS resources just created. Are you sure?')) return
     setRollingBack(true)
     try {
-      await callTool('rollback_execution', {
+      const proposal = await callTool('rollback_execution', {
+        idempotency_key: crypto.randomUUID(),
         execution_id:          executionId,
         aws_region:            awsRegion    || 'us-east-1',
       })
-      setRollbackDone(true)
-    } catch { /* silent */ }
+      setDestroyProposal(proposal)
+    } catch (error) { setError(error.message) }
     finally { setRollingBack(false) }
   }
 
@@ -123,20 +135,20 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
     setVerifyResult(null)
     try {
       const r = await callTool('run_security_analysis_with_summary', { model: model || 'groq', region: awsRegion || 'us-east-1' })
-      setVerifyResult({ count: r.total_findings })
-    } catch { /* silent */ }
+      setVerifyResult(r)
+    } catch { setVerifyResult({ status: 'failed' }) }
     finally { setVerifying(false) }
   }
 
   const reject = async () => {
     try {
-      await callTool('run_terraform_apply_mcp', {
-        execution_id: executionId,
-        approved:     false,
+      const result = await callTool('run_terraform_apply_mcp', {
+        ...decisionArgs(proposal, false, decisionKey + '-reject'),
         ...awsArgs,
       })
-    } catch { /* rejection is best-effort */ }
-    setPhase('rejected')
+      setPhase(result.status)
+      if (result.status !== 'rejected') setError(actionMessage(result))
+    } catch (error) { setError(error.message) }
   }
 
   const [badgeColor, badgeLabel] = PHASE_BADGE[phase] ?? ['blue', phase.toUpperCase()]
@@ -196,7 +208,12 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
         </div>
       )}
 
-      {(phase === 'complete' || phase === 'failed' || phase === 'rejected') && (
+      {proposal && phase === 'awaiting_approval' && <div className="aca-summary">
+        {proposal.action_type} · AWS {proposal.aws_identity?.account_id} · {proposal.aws_identity?.region}
+        <div className="mono" style={{ overflowWrap: 'anywhere' }}>Approval digest: {proposal.approval_digest}</div>
+      </div>}
+      {destroyProposal && <ActionReview key={destroyProposal.execution_id} proposal={destroyProposal} onClose={() => setDestroyProposal(null)} onComplete={() => { setRollbackDone(true); onApplyComplete?.() }} />}
+      {['complete', 'failed', 'rejected', 'uncertain', 'invalidated'].includes(phase) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {phase === 'complete' && (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', borderTop: '1px solid var(--border)', paddingTop: 12 }}>
@@ -214,7 +231,7 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
               {!rollbackDone && (
                 <button className="aca-btn-ghost small" onClick={rollback} disabled={rollingBack}
                   style={{ color: 'var(--error)' }}>
-                  {rollingBack ? '…Rolling back' : '↩ Rollback'}
+                  {rollingBack ? 'Preparing destroy plan…' : 'Review destroy plan'}
                 </button>
               )}
               <button className="aca-btn-ghost small" onClick={onDone}>↩ New Request</button>
@@ -228,19 +245,17 @@ function ExecutionInline({ hcl, description, awsRegion, model, onApplyComplete, 
               background: 'var(--warning-dim)', border: '1px solid var(--warning)',
               borderRadius: 6, padding: '8px 12px', fontSize: 12, color: 'var(--warning)',
             }}>
-              ↩ Rollback complete — created resources have been destroyed.
+              ↩ Reviewed destroy action completed.
             </div>
           )}
           {verifyResult && (
             <div style={{
-              background: verifyResult.count === 0 ? 'var(--success-dim)' : 'var(--warning-dim)',
-              border:     `1px solid ${verifyResult.count === 0 ? 'var(--success)' : 'var(--warning)'}`,
+              background: 'var(--warning-dim)',
+              border:     '1px solid var(--warning)',
               borderRadius: 6, padding: '8px 12px', fontSize: 12,
-              color: verifyResult.count === 0 ? 'var(--success)' : 'var(--warning)',
+              color: 'var(--warning)',
             }}>
-              {verifyResult.count === 0
-                ? '✓ Re-scan complete — 0 issues found.'
-                : `⚠ Re-scan found ${verifyResult.count} remaining issue(s).`}
+              {verificationMessage(verifyResult)}
             </div>
           )}
         </div>

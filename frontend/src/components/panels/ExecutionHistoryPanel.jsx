@@ -1,4 +1,5 @@
 import { useState, useEffect, Fragment } from 'react'
+import ActionReview from '../ui/ActionReview'
 import { callTool } from '../../api/mcpClient'
 
 export default function ExecutionHistoryPanel() {
@@ -98,6 +99,11 @@ export default function ExecutionHistoryPanel() {
                           <div className="mono" style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12 }}>
                             {x.aws_identity ? `AWS ${x.aws_identity.account_id} · ${x.aws_identity.region}` : 'Legacy execution: account and region are unverified'}
                           </div>
+                          {x.status === 'awaiting_approval' && x.approval_digest && <ActionReview key={id} proposal={x} onComplete={load} onClose={load} />}
+                          {x.error && <p role="status">{x.error}</p>}
+                          {(x.events || []).map((event, i) => <div key={i} className="mono" style={{ fontSize: 11 }}>
+                            {event.at} · {event.actor?.operator} ({event.actor?.kind}) · {event.from || 'new'} → {event.to}
+                          </div>)}
                           <div style={{ display: 'grid', gridTemplateColumns: x.apply_output ? '1fr 1fr' : '1fr', gap: 12, minWidth: 0 }}>
                             <div style={{ minWidth: 0 }}>
                               <div className="aca-panel-title" style={{ marginBottom: 6 }}>Plan output</div>

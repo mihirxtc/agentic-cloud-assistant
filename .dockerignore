@@ -29,3 +29,6 @@ backend/.env
 
 # Docs and markdown — not needed in the image
 *.md
+
+secrets
+backend/runner/config.json

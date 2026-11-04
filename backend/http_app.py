@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import os
 
 from docs_generator import register_mcp_docs_routes
-from services.execution_service import get_key_file, WORKDIR_BASE, PLUGIN_CACHE_DIR
+from services.execution_service import get_key_file
 from services.readiness import check_readiness
 from services.storage import get_execution_store
 from services.auth import AuthConfig, AuthService, AuthenticationMiddleware
@@ -118,11 +118,17 @@ def create_app():
     @app.get("/ready", tags=["Health"], summary="Local dependency readiness")
     def ready():
         knowledge_base = getattr(server, "knowledge_base", None) if server._RAG_AVAILABLE else None
-        result = check_readiness(store, knowledge_base, WORKDIR_BASE, PLUGIN_CACHE_DIR)
+        result = check_readiness(store, knowledge_base)
         result["checks"]["authentication"] = "ok" if auth.config.configured else "unavailable"
         if not auth.config.configured:
             result["status"] = "not_ready"
         return JSONResponse(result, status_code=200 if result["status"] == "ready" else 503)
+
+    @app.get("/ready/terraform", tags=["Health"])
+    def terraform_readiness():
+        from services.runner_client import readiness
+        result = readiness()
+        return JSONResponse(result, status_code=200 if result["ready"] else 503)
 
     @app.get("/api/ollama/status", tags=["Ollama"])
     async def ollama_status(request: Request):
@@ -154,8 +160,8 @@ def create_app():
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        except (FileNotFoundError, KeyError):
+            raise HTTPException(status_code=404, detail="Key artifact not found")
 
 
     @app.post(
