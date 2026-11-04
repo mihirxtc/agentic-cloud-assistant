@@ -524,6 +524,7 @@ is not forcibly cancelled. No external AWS exactly-once guarantee is claimed.
 
 Published Step 7 CI was checked and all three image builds plus dummy container
 isolation smoke passed: https://github.com/mihirxtc/agentic-cloud-assistant/actions/runs/41772479505.
-Step 8 changes are local, uncommitted and unpushed. Full Compose restart/browser
+Step 8 changes were committed as `4df1cc6` and pushed to GitHub `main` on
+4 November 2026. Full Compose restart/browser
 and live AWS acceptance are not performed. See status.md for latest verification.
 Next is Step 9; explain its plan and obtain approval before starting it.

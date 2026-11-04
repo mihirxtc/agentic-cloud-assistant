@@ -5,7 +5,8 @@ Updated: **4 November 2026** (Europe/London).
 ## Current position
 
 **Improvement steps 1–8 are implemented. Step 9 has not started.**
-Step 8 was implemented after user approval and is local, uncommitted and unpushed.
+Step 8 was implemented after user approval, committed as `4df1cc6` and pushed
+to GitHub `main` on 4 November 2026.
 Steps 1–7 are published on GitHub `main`: implementation commit `26a2522`, followed
 by publication notes in `5108106` (Steps 1–4 originally landed in `21813ae`).
 
@@ -105,8 +106,8 @@ Backend tests use mocked AWS/model/engine boundaries and temporary databases.
 HTTP tests run outside the sandbox due the previously established TestClient hang;
 fixtures prohibit external network access. No real Terraform apply or AWS mutation.
 
-Published Step 7 image/smoke checks passed remotely. Step 8 has not been published
-or built into deployment images. Full Compose recreation/restart, manual browser,
+Published Step 7 image/smoke checks passed remotely. Step 8 is published as `4df1cc6`; its CI result has not yet been verified,
+and no deployment images were built locally. Full Compose recreation/restart, manual browser,
 embedding/runtime stack and live sandbox-account acceptance remain outstanding.
 RAG/model-dependent and obsolete RAG HTTP suites remain outside default discovery.
 The frontend still reports an approximately 666 kB uncompressed bundle warning.
@@ -136,7 +137,7 @@ or clear locks/runner ledger entries to force a retry.
 10. Broaden integration/end-to-end coverage, redaction/logging, operational recovery
     and controlled sandbox-account deployment validation.
 
-Step 8 changes and checkpoint are local, uncommitted and unpushed. Pre-existing
+Step 8 changes and checkpoint were committed as `4df1cc6` and pushed to `main`. Pre-existing
 PROJECT-ANALYSIS.md and project-handoff/ remain local and untracked.
 Explain Step 9's current code/proposed changes/benefit and obtain approval before
 implementation. **Do not start Step 9 automatically.** Implementation approval
