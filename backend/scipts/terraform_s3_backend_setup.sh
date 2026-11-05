@@ -14,7 +14,7 @@ Grant the execution principal:
   s3:GetObject, s3:PutObject on <workspace>/terraform.tfstate
   s3:GetObject, s3:PutObject, s3:DeleteObject on <workspace>/terraform.tfstate.tflock
 
-A DynamoDB lock table is not used. See README.md, "Isolated Terraform runner",
+A DynamoDB lock table is not used. See docs/operations.md, "Isolated Terraform runner",
 for setup, volume migration, reviewed destroy and recovery instructions.
 No AWS calls or filesystem changes were performed by this helper.
 HELP
