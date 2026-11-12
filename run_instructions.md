@@ -76,7 +76,7 @@ Open **http://localhost:5173** if the browser does not open automatically. Log i
 4. Use **Background Jobs** to view progress and reopen saved results.
 5. Load costs or try a knowledge-base query.
 
-Scans require valid AWS credentials and permissions. Terraform planning and applying additionally require the Docker runner setup in [README.md](README.md#initial-runner-setup). The launcher does not configure that runner or grant approvals. The worker processes existing queued jobs, including previously approved actions.
+Scans require valid AWS credentials and permissions. Terraform planning and applying additionally require the Docker runner setup in [operations guide](docs/operations.md#initial-runner-setup). The launcher does not configure that runner or grant approvals. The worker processes existing queued jobs, including previously approved actions.
 
 ## 6. Stop and restart
 
