@@ -4,16 +4,75 @@ React dashboard and FastAPI/FastMCP backend for AWS inventory, security checks,
 cost reporting, document retrieval, and reviewed infrastructure changes.
 Implementation priorities and progress are tracked in [to_improve.md](to_improve.md).
 
+## Quick local start (Linux)
+
+Install `uv`, Node 22.12+ (CI uses Node 22), and npm, then run from the project root:
+
+```bash
+./scripts/setup.sh
+./scripts/dev.sh
+```
+
+Setup creates `.venv` using Python 3.11 through `uv` (no `python3.11` shell command
+is needed), installs the locked backend/frontend dependencies and prepares
+`backend/.env`. On first interactive setup it prompts for your operator username
+and a password of at least 12 characters, saving only a salted hash. Existing
+configuration and configured passwords are preserved. Newly created host-development
+configuration uses local Ollama and clears the example cloud-model placeholder keys.
+Set real server-side AWS/model access in that file before using the relevant tools.
+Full dependency installation includes PyTorch and can be a substantial download.
+
+The launcher checks configuration/ports and starts the API, worker and frontend,
+waits for readiness, prints **http://localhost:5173**, and opens it if a graphical
+browser is available. It runs from any working directory and does not require
+activating the virtual environment. First API startup may download/seed the embedding
+model. The API and worker run the same code revision without hot reload; restart
+the launcher after backend edits. Frontend Vite hot reload remains available.
+
+```bash
+./scripts/dev.sh --check              # Validate setup without starting services
+./scripts/dev.sh --no-browser         # Run without opening the browser
+./scripts/dev.sh --api-port 8001      # Alternate API port; Vite proxy follows it
+./scripts/dev.sh --port 5174          # Also add http://localhost:5174 to allowed origins
+./scripts/setup.sh --non-interactive  # Install/prepare config without password prompts
+```
+
+Dependencies are installed only during setup. The noninteractive mode leaves an
+unconfigured password blank; configure login before starting the browser app.
+The launcher serves localhost HTTP and requires `ACA_COOKIE_SECURE=false` plus
+its exact browser origin in `ACA_ALLOWED_ORIGINS`; it reports mismatches instead
+of overwriting your settings. Ports are strict: an occupied port is an error,
+not permission to stop another process or silently change the browser origin.
+The scripts never execute `.env` as shell code or print saved secrets.
+
+**Ctrl+C stops this run's three services and their child processes.** Active jobs
+get up to ten minutes to finish; a second Ctrl+C forces shutdown. An interrupted
+mutation may require the existing reconciliation workflow. Logs are retained under
+`.dev/logs/run-*/` with private permissions, and `.dev/` is ignored by git.
+Set `ACA_DEV_STARTUP_TIMEOUT` or `ACA_DEV_SHUTDOWN_TIMEOUT` (seconds, default 600)
+when necessary. Startup failure or an unexpected service exit stops the rest of
+this run. A project lock prevents two launcher runs from owning the same checkout.
+Linux Bash/util-linux (`setsid`, `flock`), `curl`, and `tail` are required.
+
+The shell launcher covers host development; Terraform still requires the separate
+Docker runner bootstrap below. It does not create runner tokens or grant approvals.
+The worker processes existing queued jobs, including actions already approved. To validate the launcher itself with temporary fake services:
+
+```bash
+source .venv/bin/activate
+python -m unittest discover -s scripts/tests -v
+```
+
 ## Development setup
 
 Use Python 3.11 (matching the backend image) and Node 22. The frontend Docker
 image uses Node 22 too. Run commands from the project root unless stated otherwise.
 
 ```bash
-python3.11 -m venv .venv
+uv venv --python 3.11 .venv
 source .venv/bin/activate
-python -m pip install -r backend/requirements.txt -r backend/requirements-test.txt
-python -m pip check
+uv pip install -r backend/requirements.txt -r backend/requirements-test.txt
+uv pip check
 cd frontend
 npm ci
 ```
@@ -43,7 +102,7 @@ embedding stack and full runtime environment are not yet smoke-tested.
 ```bash
 cd backend
 python -m pytest
-python -m pip check
+uv pip check
 ```
 
 The default suite tests security rules, mocked Ollama interactions, SQLite

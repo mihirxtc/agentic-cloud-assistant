@@ -181,3 +181,33 @@ Pre-existing PROJECT-ANALYSIS.md and project-handoff/ remain local and untracked
 Explain Step 10's changes and benefit before implementing it; obtain approval.
 **Do not start Step 10 automatically.** No deployment or live AWS change is
 implicitly authorized by this checkpoint.
+
+## Local launcher follow-up
+
+At the user's request, added scripts/setup.sh and scripts/dev.sh with a local-only
+Python configuration/preflight helper. Setup uses uv/Python 3.11, preserves existing
+configuration, prompts privately for a missing login and installs dependencies.
+The launcher supervises API/worker/frontend on loopback, supports readiness/checks,
+strict ports, ignored private logs and graceful cleanup of owned process groups.
+An alternate API port is passed to Vite's proxy. These changes are local and not
+yet committed or pushed; they do not start Step 10 or provision cloud resources.
+
+Twelve setup/lifecycle tests passed with temporary fake services and loopback ports,
+including graceful/forced signals and deadlines, partial startup, unexpected exit, duplicate runs, preservation
+of unrelated processes/configuration and secret-safe password hashing. Shell/Python
+syntax checks and frontend lint/build passed. CI now includes launcher tests.
+The actual full app was not started: the project .venv currently lacks runtime
+dependencies, and no private login configuration was provisioned by this work.
+Run ./scripts/setup.sh interactively, then ./scripts/dev.sh. Existing unrelated
+Ollama-test edits and analysis/handoff exports remain untouched.
+
+## Verification and publication preparation — 12 November 2026
+
+Corrected the stray opening character and non-catalog fixture in the local Ollama
+regression test. Full default offline backend suite: **337 passed, 2 optional
+Chroma acceptance checks skipped**. Latest frontend tests/lint/build and all 12
+launcher lifecycle checks passed on 11 November. Test dependencies were installed
+in a temporary environment; the application .venv still lacks runtime dependencies.
+Full app/browser, live AWS/model and Terraform acceptance remain unverified.
+Launcher changes, run instructions and historical analysis/handoff exports are
+included in this checkpoint. Step 10 has not started.
